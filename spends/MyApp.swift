@@ -6,7 +6,7 @@ import CoreTransferable
 import UniformTypeIdentifiers
 
 // =====================================================================================
-//  Spends – iOS 17+
+//  Spends – iOS 17+ (Fully Optimised Edition)
 //  CSV line format:  2026-10-01 11:40, Source|Last4|Amount|Merchant
 //  Structure:  Models → Formatting → Categoriser → Engine (actor, off-main parsing)
 //              → Store (@Observable) → Views (Today / Fixed / Month / Spends / Settings)
@@ -26,7 +26,6 @@ enum Keys {
     static let masked = "mask"
     static let cover = "cover"
     static let lock = "lock"
-    // New keys for CRUD, Fixed Expenses & Bank Balance
     static let fixedTargets = "fxt"
     static let fixedMerchantMap = "fxm"
     static let fixedTxMap = "fxtx"
@@ -47,14 +46,17 @@ enum Cats {
         ("Transfers", .gray, "arrow.left.arrow.right"),
         ("Other", Color(.systemGray2), "questionmark.circle")
     ]
-    static var names: [String] { all.map { $0.name } }
-    static func color(_ n: String) -> Color { all.first { $0.name == n }?.color ?? .gray }
-    static func symbol(_ n: String) -> String { all.first { $0.name == n }?.symbol ?? "circle" }
+    static let names: [String] = all.map { $0.name }
+    private static let colorMap: [String: Color] = Dictionary(uniqueKeysWithValues: all.map { ($0.name, $0.color) })
+    private static let symbolMap: [String: String] = Dictionary(uniqueKeysWithValues: all.map { ($0.name, $0.symbol) })
+
+    static func color(_ n: String) -> Color { colorMap[n] ?? .gray }
+    static func symbol(_ n: String) -> String { symbolMap[n] ?? "circle" }
 }
 
 // MARK: - Fixed Expense Buckets (Auto-detected + Manual Pinning)
 
-enum FixedBucket: String, CaseIterable, Identifiable, Codable, Sendable {
+enum FixedBucket: String, CaseIterable, Identifiable, Codable, Sendable, Equatable {
     case rent = "Rent"
     case home = "Home"
     case elecFlat = "Electricity Bill Flat"
@@ -205,7 +207,7 @@ enum Categorizer {
     static let rules: [(String, [String])] = [
         ("Food", ["swiggy", "zomato", "restaurant", "cafe", "kfc", "domino", "pizza", "starbucks", "bakery", "eatfit", "mcdonald", "burger"]),
         ("Groceries", ["blinkit", "zepto", "bigbasket", "instamart", "dmart", "grocer", "ratnadeep", "reliance smart", "more supermarket"]),
-        ("Transport", ["uber", "ola", "olacabs", "rapido", "irctc", "fuel", "petrol", "shell", "hpcl", "bpcl", "iocl", "indian oil", "bharat petroleum", "hindustan petroleum", "metro", "redbus", "fastag", "mmt"]),
+        ("Transport", ["uber", "ola", "olacabs", "rapido", "irctc", "fuel", "petrol", "diesel", "shell", "hpcl", "bpcl", "iocl", "indian oil", "bharat petroleum", "hindustan petroleum", "metro", "redbus", "fastag", "mmt"]),
         ("Shopping", ["amazon", "flipkart", "myntra", "ajio", "nykaa", "decathlon", "uniqlo", "zara"]),
         ("Bills", ["jio", "airtel", "electric", "bescom", "mahadiscom", "tata power", "adani elec", "ebill", "recharge", "cred", "insurance", "rent", "nobroker", "nestaway", "raz*", "furnish", "society", "maintenance", "urban company", "ikea", "home centre"]),
         ("Health", ["pharm", "apollo", "hospital", "clinic", "medic", "1mg", "medplus", "practo"]),
@@ -223,43 +225,41 @@ enum Categorizer {
         return (cat, rx)
     }
 
+    private static let fixedRules: [(FixedBucket, NSRegularExpression)] = [
+        (.rent, try! NSRegularExpression(
+            pattern: "(?<![a-z0-9])(rent|house rent|flat rent|nobroker|nestaway|stanza|landlord)(?![a-z0-9])",
+            options: [.caseInsensitive]
+        )),
+        (.elecHome, try! NSRegularExpression(
+            pattern: "(?<![a-z0-9])(electricity home|eb home|home electric|home bescom|parents electric)(?![a-z0-9])",
+            options: [.caseInsensitive]
+        )),
+        (.elecFlat, try! NSRegularExpression(
+            pattern: "(?<![a-z0-9])(bescom|electric|electricity|ebill|mahadiscom|tata power|adani elec|cesc|tneb|mseb|kseb)(?![a-z0-9])",
+            options: [.caseInsensitive]
+        )),
+        (.fuel, try! NSRegularExpression(
+            pattern: "(?<![a-z0-9])(fuel|petrol|diesel|shell|hpcl|bpcl|iocl|indian oil|bharat petroleum|hindustan petroleum)(?![a-z0-9])",
+            options: [.caseInsensitive]
+        )),
+        (.home, try! NSRegularExpression(
+            pattern: "(?<![a-z0-9])(home|maintenance|society|mygate|adda|urban company|urbanclap|ikea|furnish|maid|cook|water bill|gas bill|indane|bharatgas|hp gas)(?![a-z0-9])",
+            options: [.caseInsensitive]
+        ))
+    ]
+
     static func category(for merchant: String) -> String {
         let r = NSRange(merchant.startIndex..., in: merchant)
         for (c, rx) in compiled where rx.firstMatch(in: merchant, options: [], range: r) != nil { return c }
         return "Other"
     }
 
-    // Auto-detect Fixed Expense Bucket from merchant text & resolved category
-    private static let fuelRx = try! NSRegularExpression(
-        pattern: "(?<![a-z0-9])(fuel|petrol|diesel|shell|hpcl|bpcl|iocl|indian oil|bharat petroleum|hindustan petroleum)(?![a-z0-9])",
-        options: [.caseInsensitive]
-    )
-    private static let rentRx = try! NSRegularExpression(
-        pattern: "(?<![a-z0-9])(rent|house rent|flat rent|nobroker|nestaway|stanza|landlord)(?![a-z0-9])",
-        options: [.caseInsensitive]
-    )
-    private static let elecHomeRx = try! NSRegularExpression(
-        pattern: "(?<![a-z0-9])(electricity home|eb home|home electric|home bescom|parents electric)(?![a-z0-9])",
-        options: [.caseInsensitive]
-    )
-    private static let elecFlatRx = try! NSRegularExpression(
-        pattern: "(?<![a-z0-9])(bescom|electric|electricity|ebill|mahadiscom|tata power|adani elec|cesc|tneb|mseb|kseb)(?![a-z0-9])",
-        options: [.caseInsensitive]
-    )
-    private static let homeRx = try! NSRegularExpression(
-        pattern: "(?<![a-z0-9])(home|maintenance|society|mygate|adda|urban company|urbanclap|ikea|furnish|maid|cook|water bill|gas bill|indane|bharatgas|hp gas)(?![a-z0-9])",
-        options: [.caseInsensitive]
-    )
-
+    /// Evaluates keyword-based fixed buckets first, then falls back to category-based mapping.
     static func fixedBucket(for merchant: String, category: String) -> FixedBucket? {
         let r = NSRange(merchant.startIndex..., in: merchant)
-        // Check specific keyword matches first
-        if rentRx.firstMatch(in: merchant, options: [], range: r) != nil { return .rent }
-        if elecHomeRx.firstMatch(in: merchant, options: [], range: r) != nil { return .elecHome }
-        if elecFlatRx.firstMatch(in: merchant, options: [], range: r) != nil { return .elecFlat }
-        if fuelRx.firstMatch(in: merchant, options: [], range: r) != nil { return .fuel }
-        if homeRx.firstMatch(in: merchant, options: [], range: r) != nil { return .home }
-        // Category-level auto-mapping for Food and Groceries
+        for (bucket, rx) in fixedRules where rx.firstMatch(in: merchant, options: [], range: r) != nil {
+            return bucket
+        }
         if category == "Food" { return .food }
         if category == "Groceries" { return .groceries }
         return nil
@@ -292,14 +292,14 @@ struct CustomTxRecord: Codable, Sendable, Equatable {
     var isManual: Bool
 }
 
-struct LocalDeltaStore: Codable, Sendable {
+struct LocalDeltaStore: Codable, Sendable, Equatable {
     var custom: [CustomTxRecord] = []         // User-added transactions
     var edits: [String: CustomTxRecord] = [:] // Edits to CSV or manual transactions keyed by ID
     var deleted: Set<String> = []             // Deleted transaction IDs
 }
 
-struct Tx: Identifiable, Sendable {
-    enum Reason: Sendable {
+struct Tx: Identifiable, Sendable, Equatable {
+    enum Reason: Sendable, Equatable {
         case excluded, duplicate, transfer
         var label: String {
             switch self {
@@ -314,29 +314,32 @@ struct Tx: Identifiable, Sendable {
     let src: String
     let last4: String
     let amt: Decimal
-    let merchant: String      // raw text from the CSV or user input
-    let name: String          // cleaned for display
-    let key: String           // used for "apply to all"
+    let merchant: String          // raw text from the CSV or user input
+    let name: String              // cleaned for display
+    let key: String               // used for "apply to all"
     let bank: String
-    let auto: String          // automatic category
-    let hay: String           // lowercase search text
-    var cat: String           // effective category (after overrides)
+    let auto: String              // automatic category
+    let autoFixed: FixedBucket?   // automatic fixed bucket (cached off-main-thread)
+    let hay: String               // lowercase search text
+    var cat: String               // effective category (after overrides)
     var fixedBucket: FixedBucket? // effective fixed expense bucket (auto or manual)
     var isManual: Bool = false
     var isEdited: Bool = false
-    var reason: Reason?       // nil = counted in totals
+    var reason: Reason?           // nil = counted in totals
     var counted: Bool { reason == nil }
 
     static func make(id: String, date: Date, src: String, last4: String, amt: Decimal, merchant: String, isManual: Bool = false, isEdited: Bool = false) -> Tx {
         let auto = Categorizer.category(for: merchant)
+        let autoFixed = Categorizer.fixedBucket(for: merchant, category: auto)
         let hay = "\(merchant) \(src) \(last4) \(amt)".lowercased()
         return Tx(id: id, date: date, src: src, last4: last4, amt: amt, merchant: merchant,
                   name: Merchant.clean(merchant), key: Merchant.key(merchant), bank: bankName(src),
-                  auto: auto, hay: hay, cat: auto, fixedBucket: nil, isManual: isManual, isEdited: isEdited)
+                  auto: auto, autoFixed: autoFixed, hay: hay, cat: auto, fixedBucket: autoFixed,
+                  isManual: isManual, isEdited: isEdited)
     }
 }
 
-struct Period: Hashable, Identifiable {
+struct Period: Hashable, Identifiable, Sendable {
     let anchor: Date, start: Date, end: Date, cycleDay: Int
     var id: Date { anchor }
     var title: String {
@@ -348,35 +351,40 @@ struct Period: Hashable, Identifiable {
     static let placeholder = Period(anchor: .now, start: .now, end: .now, cycleDay: 1)
 }
 
-struct Part: Identifiable {
+struct Part: Identifiable, Equatable {
     let id: String
     let value: Decimal
     let pct: Int
     let color: Color
     var dbl: Double { value.dbl }
 }
-struct DayTotal: Identifiable {
+struct DayTotal: Identifiable, Equatable {
     let date: Date
     let total: Decimal
     let pct: Int
     var id: Date { date }
     var dbl: Double { total.dbl }
 }
-struct PeriodTotal: Identifiable {
+struct PeriodTotal: Identifiable, Equatable {
     let anchor: Date
     let total: Decimal
     var id: Date { anchor }
     var dbl: Double { total.dbl }
 }
-struct MerchantTotal: Identifiable { let id: String; let total: Decimal; let count: Int }
-struct Recurring: Identifiable { let id: String; let name: String; let amount: Decimal; let count: Int }
-struct ReviewItem: Identifiable { let id: String; let name: String; let count: Int; let total: Decimal }
-struct BudgetTarget: Identifiable { let id: String }
-struct FixedBudgetTarget: Identifiable { let bucket: FixedBucket; var id: String { bucket.rawValue } }
-struct Toast: Identifiable { let id = UUID(); let text: String; let canUndo: Bool }
-struct DayGroup: Identifiable { let date: Date; let items: [Tx]; let total: Decimal; var id: Date { date } }
+struct MerchantTotal: Identifiable, Equatable { let id: String; let total: Decimal; let count: Int }
+struct Recurring: Identifiable, Equatable { let id: String; let name: String; let amount: Decimal; let count: Int }
+struct ReviewItem: Identifiable, Equatable { let id: String; let name: String; let count: Int; let total: Decimal }
+struct BudgetTarget: Identifiable, Equatable { let id: String }
+struct FixedBudgetTarget: Identifiable, Equatable { let bucket: FixedBucket; var id: String { bucket.rawValue } }
+struct Toast: Identifiable, Equatable { let id = UUID(); let text: String; let canUndo: Bool }
+struct DayGroup: Identifiable, Equatable { let date: Date; let items: [Tx]; let total: Decimal; var id: Date { date } }
+struct SourcePair: Hashable, Identifiable, Sendable {
+    let src: String
+    let last4: String
+    var id: String { "\(src)|\(last4)" }
+}
 
-struct FixedItemStat: Identifiable {
+struct FixedItemStat: Identifiable, Equatable {
     let bucket: FixedBucket
     var spent: Decimal
     var target: Decimal?
@@ -389,14 +397,14 @@ struct FixedItemStat: Identifiable {
     }
 }
 
-struct FixedMonthSummary {
+struct FixedMonthSummary: Equatable {
     var items: [FixedItemStat] = []
     var totalSpent: Decimal = 0
     var totalBudgeted: Decimal = 0
-    var unpaidRemaining: Decimal = 0 // Sum of remaining targets for buckets not yet fully spent
+    var unpaidRemaining: Decimal = 0
 }
 
-struct BalanceStatus {
+struct BalanceStatus: Equatable {
     var isConfigured: Bool = false
     var startingBalance: Decimal = 0
     var asOfDate: Date = .now
@@ -407,7 +415,7 @@ struct BalanceStatus {
     var safeToSpend: Decimal = 0
 }
 
-struct MonthStats {
+struct MonthStats: Equatable {
     var period: Period
     var isCurrent = true
     var txs: [Tx] = []                    // everything in the period, newest first
@@ -430,7 +438,7 @@ struct MonthStats {
     }
 }
 
-struct TodayStats {
+struct TodayStats: Equatable {
     var txs: [Tx] = []
     var total: Decimal = 0
     var count = 0
@@ -447,8 +455,10 @@ enum SyncState: Equatable {
 // MARK: - Grouping helpers (pure, safe to call off the main thread)
 
 func groupByDay(_ txs: [Tx]) -> [DayGroup] {
+    guard !txs.isEmpty else { return [] }
     let cal = Calendar.current
     var out: [DayGroup] = []
+    out.reserveCapacity(min(txs.count, 31))
     var curDay: Date?
     var items: [Tx] = []
     var total = Decimal.zero
@@ -466,6 +476,9 @@ func groupByDay(_ txs: [Tx]) -> [DayGroup] {
 }
 
 func buildGroups(_ src: [Tx], cat: String, bank: String, query: String) -> [DayGroup] {
+    if cat == "All" && bank == "All" && query.isEmpty {
+        return groupByDay(src)
+    }
     let filtered = src.filter { t in
         if cat != "All" && t.cat != cat { return false }
         if bank != "All" && t.bank != bank { return false }
@@ -476,7 +489,7 @@ func buildGroups(_ src: [Tx], cat: String, bank: String, query: String) -> [DayG
 }
 
 // =====================================================================================
-// MARK: - Engine: file access, incremental parsing, disk cache (all off the main thread)
+// MARK: - Engine: file access, incremental parsing, serialized disk cache (off-main)
 // =====================================================================================
 
 struct Stamp: Equatable, Sendable { var date: Date?; var size: Int? }
@@ -516,6 +529,13 @@ actor Engine {
         return (txs, bad)
     }
 
+    /// Serialized, thread-safe write for local CRUD delta changes.
+    func saveDelta(_ delta: LocalDeltaStore, to url: URL) {
+        if let encoded = try? JSONEncoder().encode(delta) {
+            try? encoded.write(to: url, options: .atomic)
+        }
+    }
+
     func load(force: Bool) async -> LoadResult {
         switch resolve() {
         case .none: return .noFile
@@ -530,7 +550,7 @@ actor Engine {
             case .data(let d, let st):
                 lastStamp = st
                 let txs = process(d, force: force)
-                writeCache(d)
+                try? d.write(to: cacheURL, options: .atomic)
                 return .updated(txs, bad)
             }
         }
@@ -581,12 +601,7 @@ actor Engine {
         return dir.appendingPathComponent("spends-cache.csv")
     }
 
-    private func writeCache(_ d: Data) {
-        let url = cacheURL
-        DispatchQueue.global(qos: .background).async { try? d.write(to: url, options: .atomic) }
-    }
-
-    // MARK: Parsing (incremental when the file was only appended to)
+    // MARK: Parsing (incremental fast-path when the file was only appended to)
 
     private func process(_ data: Data, force: Bool) -> [Tx] {
         let n = data.count
@@ -601,17 +616,33 @@ actor Engine {
         if let nl = data[parsedBytes..<n].lastIndex(of: 0x0A) {
             let end = nl + 1
             let parsed = parseChunk(data[parsedBytes..<end], seen: &seen, bad: &bad)
-            committed.append(contentsOf: parsed)
+            if !parsed.isEmpty {
+                let sortedChunk = parsed.sorted { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+                if committed.isEmpty {
+                    committed = sortedChunk
+                } else if let newestCommitted = committed.first, let oldestNew = sortedChunk.last, oldestNew.date >= newestCommitted.date {
+                    // Fast path: appended lines are newer than existing committed history
+                    committed.insert(contentsOf: sortedChunk, at: 0)
+                } else {
+                    committed.append(contentsOf: sortedChunk)
+                    committed.sort { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+                }
+            }
             parsedBytes = end
             tailSig = data.subdata(in: max(0, end - 64)..<end)
         }
-        var result = committed
         if parsedBytes < n {
             var tmpSeen = seen
             var tmpBad = 0
-            result.append(contentsOf: parseChunk(data[parsedBytes..<n], seen: &tmpSeen, bad: &tmpBad))
+            let tail = parseChunk(data[parsedBytes..<n], seen: &tmpSeen, bad: &tmpBad)
+            if !tail.isEmpty {
+                var result = committed
+                result.append(contentsOf: tail)
+                result.sort { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+                return result
+            }
         }
-        return result.sorted { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+        return committed
     }
 
     private func parseChunk(_ chunk: Data, seen: inout [String: Int], bad: inout Int) -> [Tx] {
@@ -725,7 +756,7 @@ enum Sample {
     var ledger: [Tx] = []
     var hasData = false
     var banks: [String] = []
-    var sources: [(src: String, last4: String)] = []
+    var sources: [SourcePair] = []
     var today = TodayStats()
     var month = MonthStats(period: Period.placeholder)
     var balanceStatus = BalanceStatus()
@@ -769,7 +800,8 @@ enum Sample {
     var coverEnabled = true
     var lockEnabled = false
 
-    // Local CRUD Delta Store
+    // O(1) Lookup caches & Internal state
+    @ObservationIgnored var keyCounts: [String: Int] = [:]
     @ObservationIgnored private var delta = LocalDeltaStore()
     @ObservationIgnored private var raw: [Tx] = []
     @ObservationIgnored private let engine = Engine()
@@ -893,6 +925,7 @@ enum Sample {
                 FixedBucket.food.rawValue: 8000,
                 FixedBucket.groceries.rawValue: 6000
             ]
+            UserDefaults.standard.set(fixedTargets, forKey: Keys.fixedTargets)
         }
         if bankBalance == nil {
             bankBalance = 145000
@@ -986,51 +1019,79 @@ enum Sample {
         return (total, min(max(e, 1), total))
     }
 
-    // MARK: Recompute (merges CSV raw + local CRUD deltas + categories + Fixed Buckets)
+    // MARK: Recompute (Single O(N) pass, Zero Main-Thread Regex)
 
     func recompute() {
         version &+= 1
         let ov = overrides, tov = txOverrides, ex = excluded, hide = hideTransfers
         let fxm = fixedMerchantMap, fxtx = fixedTxMap
 
-        // 1. Merge CSV transactions with local edits and deletions
         var merged: [Tx] = []
         merged.reserveCapacity(raw.count + delta.custom.count)
 
-        for item in raw where !delta.deleted.contains(item.id) {
-            if let edit = delta.edits[item.id] {
-                merged.append(Tx.make(id: item.id, date: edit.date, src: edit.src, last4: edit.last4,
-                                      amt: edit.amt, merchant: edit.merchant, isManual: false, isEdited: true))
-            } else {
-                merged.append(item)
+        let hasDeletes = !delta.deleted.isEmpty
+        let hasEdits = !delta.edits.isEmpty
+
+        if !hasDeletes && !hasEdits {
+            merged = raw
+        } else {
+            for item in raw {
+                if hasDeletes && delta.deleted.contains(item.id) { continue }
+                if hasEdits, let edit = delta.edits[item.id] {
+                    merged.append(Tx.make(id: item.id, date: edit.date, src: edit.src, last4: edit.last4,
+                                          amt: edit.amt, merchant: edit.merchant, isManual: false, isEdited: true))
+                } else {
+                    merged.append(item)
+                }
             }
         }
 
-        // 2. Append user-created manual transactions
         for manual in delta.custom where !delta.deleted.contains(manual.id) {
             let rec = delta.edits[manual.id] ?? manual
             merged.append(Tx.make(id: rec.id, date: rec.date, src: rec.src, last4: rec.last4,
                                   amt: rec.amt, merchant: rec.merchant, isManual: true, isEdited: delta.edits[manual.id] != nil))
         }
 
-        // Sort newest first
-        merged.sort { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+        if hasEdits || !delta.custom.isEmpty {
+            merged.sort { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+        }
 
-        // 3. Apply categories, fixed buckets, and exclusions
+        var kCounts: [String: Int] = [:]
+        kCounts.reserveCapacity(min(merged.count, 256))
+        var bankSet = Set<String>()
+        var seenSrc = Set<String>()
+        var srcList: [SourcePair] = []
+        var rv: [String: (name: String, n: Int, total: Decimal)] = [:]
+        var tot: [Date: Decimal] = [:]
+
+        // Resolve categories, fixed buckets, and exclusions first
         for i in merged.indices {
-            let c = tov[merged[i].id] ?? ov[merged[i].key] ?? merged[i].auto
+            let k = merged[i].key
+            let id = merged[i].id
+            kCounts[k, default: 0] += 1
+
+            let c = tov[id] ?? ov[k] ?? merged[i].auto
             merged[i].cat = c
 
-            // Resolve Fixed Expense Bucket: Tx Pin -> Merchant Pin -> Auto-detection
-            if let pinned = fxtx[merged[i].id] {
+            // O(1) Fixed Bucket Resolution (No regex on MainActor)
+            if let pinned = fxtx[id] {
                 merged[i].fixedBucket = (pinned == "NONE") ? nil : FixedBucket(rawValue: pinned)
-            } else if let mPinned = fxm[merged[i].key] {
+            } else if let mPinned = fxm[k] {
                 merged[i].fixedBucket = (mPinned == "NONE") ? nil : FixedBucket(rawValue: mPinned)
             } else {
-                merged[i].fixedBucket = Categorizer.fixedBucket(for: merged[i].merchant, category: c)
+                let af = merged[i].autoFixed
+                if let af, af != .food && af != .groceries {
+                    merged[i].fixedBucket = af
+                } else if c == "Food" {
+                    merged[i].fixedBucket = .food
+                } else if c == "Groceries" {
+                    merged[i].fixedBucket = .groceries
+                } else {
+                    merged[i].fixedBucket = nil
+                }
             }
 
-            if ex.contains(merged[i].id) { merged[i].reason = .excluded }
+            if ex.contains(id) { merged[i].reason = .excluded }
             else if hide && c == "Transfers" { merged[i].reason = .transfer }
             else { merged[i].reason = nil }
         }
@@ -1048,47 +1109,50 @@ enum Sample {
             }
         }
 
-        ledger = merged
-        hasData = !merged.isEmpty
-        banks = Set(merged.map { $0.bank }).sorted()
-
-        // Distinct (src, last4) pairs for quick picker when adding manual entries
-        var seenSrc = Set<String>()
-        var srcList: [(src: String, last4: String)] = []
+        // Single pass for aggregates (banks, sources, review inbox, history totals)
         for t in merged {
-            let k = "\(t.src)|\(t.last4)"
-            if !seenSrc.contains(k) && !t.src.isEmpty {
-                seenSrc.insert(k)
-                srcList.append((t.src, t.last4))
+            bankSet.insert(t.bank)
+            if !t.src.isEmpty {
+                let pair = SourcePair(src: t.src, last4: t.last4)
+                if seenSrc.insert(pair.id).inserted {
+                    srcList.append(pair)
+                }
+            }
+            if t.counted {
+                tot[anchor(of: t.date), default: 0] += t.amt
+                if t.cat == "Other" && ov[t.key] == nil && tov[t.id] == nil {
+                    let e = rv[t.key] ?? (t.name, 0, Decimal.zero)
+                    rv[t.key] = (e.name, e.n + 1, e.total + t.amt)
+                }
             }
         }
+
+        keyCounts = kCounts
+        ledger = merged
+        hasData = !merged.isEmpty
+        banks = bankSet.sorted()
         sources = srcList
 
-        // Needs-a-category inbox
-        var rv: [String: (name: String, n: Int, total: Decimal)] = [:]
-        for t in merged where t.cat == "Other" && ov[t.key] == nil && tov[t.id] == nil && t.counted {
-            let e = rv[t.key] ?? (t.name, 0, Decimal.zero)
-            rv[t.key] = (e.name, e.n + 1, e.total + t.amt)
-        }
-        review = rv.map { ReviewItem(id: $0.key, name: $0.value.name, count: $0.value.n, total: $0.value.total) }
+        let sortedReview = rv.map { ReviewItem(id: $0.key, name: $0.value.name, count: $0.value.n, total: $0.value.total) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
-        review = Array(review.prefix(40))
+        review = Array(sortedReview.prefix(40))
 
-        // Totals per period (history chart)
-        var tot: [Date: Decimal] = [:]
-        for t in merged where t.counted { tot[anchor(of: t.date), default: 0] += t.amt }
         history = tot.map { PeriodTotal(anchor: $0.key, total: $0.value) }.sorted { $0.anchor < $1.anchor }
-
         recurring = detectRecurring(merged)
         derive()
     }
 
     private func detectRecurring(_ l: [Tx]) -> [Recurring] {
-        let groups = Dictionary(grouping: l.filter { $0.counted && $0.amt > 0 }, by: { $0.key })
+        var groups: [String: [Tx]] = [:]
+        for t in l where t.counted && t.amt > 0 && !t.key.isEmpty {
+            groups[t.key, default: []].append(t)
+        }
         var out: [Recurring] = []
-        for (k, g) in groups where g.count >= 3 && !k.isEmpty {
-            let s = g.sorted { $0.date < $1.date }
+        for (k, g) in groups where g.count >= 3 {
+            // `l` is newest-first, so `g.reversed()` is oldest-first without sorting!
+            let s = Array(g.reversed())
             var gaps: [Double] = []
+            gaps.reserveCapacity(s.count - 1)
             for i in 1..<s.count { gaps.append(s[i].date.timeIntervalSince(s[i - 1].date) / 86400) }
             gaps.sort()
             guard (25.0...35.0).contains(gaps[gaps.count / 2]) else { continue }
@@ -1107,6 +1171,8 @@ enum Sample {
         return arr.indices.map { Part(id: arr[$0].0, value: arr[$0].1, pct: pc[$0], color: color(arr[$0].0)) }
     }
 
+    // MARK: Derive (Early-Exit O(K) Sorted Loops)
+
     func derive() {
         cal = Calendar.current
         let cur = period(containing: now)
@@ -1114,23 +1180,39 @@ enum Sample {
         let isCur = sel.anchor == cur.anchor
         let (totalDays, elapsed) = span(sel, current: isCur)
 
-        // ---- Selected month
-        let inPeriod = ledger.filter { $0.date >= sel.start && $0.date < sel.end }
-        let counted = inPeriod.filter { $0.counted }
-        let total = counted.reduce(Decimal.zero) { $0 + $1.amt }
+        // 1. Slice selected month with early exit
+        var inPeriod: [Tx] = []
+        var counted: [Tx] = []
+        var total = Decimal.zero
+        for t in ledger {
+            if t.date >= sel.end { continue }
+            if t.date < sel.start { break }
+            inPeriod.append(t)
+            if t.counted {
+                counted.append(t)
+                total += t.amt
+            }
+        }
 
+        // 2. Compare same number of days of previous period with early exit
         let prevAnchor = cal.date(byAdding: .month, value: -1, to: sel.anchor) ?? sel.anchor
         let prevStart = period(anchor: prevAnchor).start
         let prevEnd = min(cal.date(byAdding: .day, value: elapsed, to: prevStart) ?? sel.start, sel.start)
         var prevTotal = Decimal.zero
-        for t in ledger where t.counted && t.date >= prevStart && t.date < prevEnd { prevTotal += t.amt }
+        for t in ledger {
+            if t.date >= prevEnd { continue }
+            if t.date < prevStart { break }
+            if t.counted { prevTotal += t.amt }
+        }
 
+        // 3. Selected month breakdowns
         var byCat: [String: Decimal] = [:]
         var byBank: [String: Decimal] = [:]
         var byDay: [Date: Decimal] = [:]
         var mt: [String: (Decimal, Int)] = [:]
         var wd: [Int: Decimal] = [:]
         var byFixed: [FixedBucket: [Tx]] = [:]
+        var biggest: Tx?
 
         for t in counted {
             byCat[t.cat, default: 0] += t.amt
@@ -1143,12 +1225,13 @@ enum Sample {
                 let e = mt[t.name] ?? (Decimal.zero, 0)
                 mt[t.name] = (e.0 + t.amt, e.1 + 1)
                 wd[cal.component(.weekday, from: t.date), default: 0] += t.amt
+                if biggest == nil || t.amt > biggest!.amt { biggest = t }
             }
         }
         for k in budgets.keys where k != "All" && byCat[k] == nil { byCat[k] = 0 }
 
-        // Build Fixed Expenses Summary for Selected Month
         var fixedItems: [FixedItemStat] = []
+        fixedItems.reserveCapacity(FixedBucket.allCases.count)
         var fixedSpentTotal = Decimal.zero
         var fixedBudgetTotal = Decimal.zero
         var unpaidFixed = Decimal.zero
@@ -1160,8 +1243,7 @@ enum Sample {
             fixedSpentTotal += spent
             if let td = targetDec {
                 fixedBudgetTotal += td
-                let rem = max(td - spent, 0)
-                unpaidFixed += rem
+                unpaidFixed += max(td - spent, 0)
             }
             fixedItems.append(FixedItemStat(bucket: bucket, spent: spent, target: targetDec, count: bucketTxs.count, txs: bucketTxs))
         }
@@ -1184,10 +1266,10 @@ enum Sample {
         ms.days = dayRows.indices.map { DayTotal(date: dayRows[$0].0, total: dayRows[$0].1, pct: dayPct[$0]) }
         ms.dailyAvg = total / Decimal(max(elapsed, 1))
         if isCur && elapsed >= 3 { ms.projected = total / Decimal(elapsed) * Decimal(totalDays) }
-        ms.biggest = counted.filter { $0.amt > 0 }.max { $0.amt < $1.amt }
-        ms.merchants = mt.map { MerchantTotal(id: $0.key, total: $0.value.0, count: $0.value.1) }
+        ms.biggest = biggest
+        let sortedMerchants = mt.map { MerchantTotal(id: $0.key, total: $0.value.0, count: $0.value.1) }
             .sorted { $0.total != $1.total ? $0.total > $1.total : $0.id < $1.id }
-        ms.merchants = Array(ms.merchants.prefix(5))
+        ms.merchants = Array(sortedMerchants.prefix(5))
         if counted.count >= 7, let top = wd.max(by: { $0.value < $1.value }) {
             ms.busiestDay = cal.weekdaySymbols[top.key - 1]
         }
@@ -1198,17 +1280,37 @@ enum Sample {
         set.insert(cur.anchor); set.insert(sel.anchor)
         periods = set.sorted(by: >).map { period(anchor: $0) }
 
-        // ---- Today
+        // 4. Today, 7-day chart & 30-day average in a single early-exit scan
         let sod = cal.startOfDay(for: now)
         let tomorrow = cal.date(byAdding: .day, value: 1, to: sod) ?? sod
-        let todayTx = ledger.filter { $0.date >= sod && $0.date < tomorrow }
-        let todayTotal = todayTx.reduce(Decimal.zero) { $1.counted ? $0 + $1.amt : $0 }
-
         let weekStart = cal.date(byAdding: .day, value: -6, to: sod) ?? sod
+        let start30 = cal.date(byAdding: .day, value: -30, to: sod) ?? sod
+
+        var todayTx: [Tx] = []
+        var todayTotal = Decimal.zero
+        var todayCount = 0
         var wk: [Date: Decimal] = [:]
-        for t in ledger where t.counted && t.date >= weekStart && t.date < tomorrow {
-            wk[cal.startOfDay(for: t.date), default: 0] += t.amt
+        var sum30 = Decimal.zero
+
+        for t in ledger {
+            if t.date >= tomorrow { continue }
+            if t.date < start30 { break } // Early exit at 30 days ago!
+
+            if t.date >= sod {
+                todayTx.append(t)
+                if t.counted {
+                    todayTotal += t.amt
+                    todayCount += 1
+                }
+            } else if t.counted {
+                sum30 += t.amt
+            }
+
+            if t.counted && t.date >= weekStart {
+                wk[cal.startOfDay(for: t.date), default: 0] += t.amt
+            }
         }
+
         let week: [DayTotal] = (0..<7).map { i in
             let d = cal.startOfDay(for: cal.date(byAdding: .day, value: i - 6, to: sod) ?? sod)
             return DayTotal(date: d, total: wk[d] ?? 0, pct: 0)
@@ -1216,25 +1318,23 @@ enum Sample {
 
         var avg: Decimal?
         if let oldest = ledger.last?.date {
-            let start30 = cal.date(byAdding: .day, value: -30, to: sod) ?? sod
-            var sum30 = Decimal.zero
-            for t in ledger where t.counted && t.date >= start30 && t.date < sod { sum30 += t.amt }
             let histDays = max(min(cal.dateComponents([.day], from: cal.startOfDay(for: oldest), to: sod).day ?? 0, 30), 0)
             if histDays >= 3 { avg = sum30 / Decimal(histDays) }
         }
 
-        let curTotal: Decimal = isCur ? total : ledger.reduce(Decimal.zero) {
-            ($1.counted && $1.date >= cur.start && $1.date < cur.end) ? $0 + $1.amt : $0
-        }
-
-        // Compute current month's unpaid fixed expenses if viewing a past month
-        let curUnpaidFixed: Decimal
-        if isCur {
-            curUnpaidFixed = unpaidFixed
-        } else {
+        // Current period metrics (when viewing a past month)
+        var curTotal = total
+        var curUnpaidFixed = unpaidFixed
+        if !isCur {
+            curTotal = 0
             var curByFixed: [FixedBucket: Decimal] = [:]
-            for t in ledger where t.counted && t.date >= cur.start && t.date < cur.end {
-                if let fb = t.fixedBucket { curByFixed[fb, default: 0] += t.amt }
+            for t in ledger {
+                if t.date >= cur.end { continue }
+                if t.date < cur.start { break }
+                if t.counted {
+                    curTotal += t.amt
+                    if let fb = t.fixedBucket { curByFixed[fb, default: 0] += t.amt }
+                }
             }
             var uf = Decimal.zero
             for b in FixedBucket.allCases {
@@ -1245,14 +1345,17 @@ enum Sample {
             curUnpaidFixed = uf
         }
 
-        // ---- Real Bank Balance Calculation
+        // 5. Real Bank Balance Calculation (Early-exit scan)
         if let bal = bankBalance {
             let startBal = Decimal(bal)
             let spentAgainst: Decimal
             if bankBalanceMode == "sinceDate" {
-                spentAgainst = ledger.reduce(Decimal.zero) {
-                    ($1.counted && $1.date >= bankBalanceDate) ? $0 + $1.amt : $0
+                var sumSince = Decimal.zero
+                for t in ledger {
+                    if t.date < bankBalanceDate { break }
+                    if t.counted { sumSince += t.amt }
                 }
+                spentAgainst = sumSince
             } else {
                 spentAgainst = curTotal
             }
@@ -1282,7 +1385,7 @@ enum Sample {
             left = a - todayTotal
         }
 
-        today = TodayStats(txs: todayTx, total: todayTotal, count: todayTx.filter { $0.counted }.count,
+        today = TodayStats(txs: todayTx, total: todayTotal, count: todayCount,
                            avg: avg, week: week, allowance: allowance, left: left)
     }
 
@@ -1301,14 +1404,11 @@ enum Sample {
         d.set(fixedTxMap, forKey: Keys.fixedTxMap)
         let currentDelta = delta
         let url = deltaFileURL
-        DispatchQueue.global(qos: .utility).async {
-            if let encoded = try? JSONEncoder().encode(currentDelta) {
-                try? encoded.write(to: url, options: .atomic)
-            }
+        Task {
+            await engine.saveDelta(currentDelta, to: url)
         }
     }
 
-    /// Add a brand-new manual spend
     func addManualTx(date: Date, src: String, last4: String, amt: Decimal, merchant: String, cat: String, fixedBucket: FixedBucket?) {
         let u = snapshot()
         let id = "manual-\(UUID().uuidString)"
@@ -1319,16 +1419,13 @@ enum Sample {
         let record = CustomTxRecord(id: id, date: date, src: cleanSrc, last4: cleanLast4, amt: amt, merchant: cleanMerchant, isManual: true)
         delta.custom.append(record)
         txOverrides[id] = cat
-        if let fb = fixedBucket {
-            fixedTxMap[id] = fb.rawValue
-        }
+        fixedTxMap[id] = fixedBucket?.rawValue ?? "NONE"
         persistRules()
         recompute()
         newSpendTick += 1
         show("Added \(Merchant.clean(cleanMerchant)) (\(m(amt)))", undo: u)
     }
 
-    /// Update any existing spend (CSV or Manual)
     func updateTx(_ t: Tx, date: Date, src: String, last4: String, amt: Decimal, merchant: String, cat: String, applyCatAll: Bool, fixedBucket: FixedBucket?, applyFixedAll: Bool) {
         let u = snapshot()
         let cleanSrc = src.trimmingCharacters(in: .whitespaces).isEmpty ? t.src : src.trimmingCharacters(in: .whitespaces)
@@ -1343,8 +1440,7 @@ enum Sample {
         let newKey = Merchant.key(cleanMerchant)
         if applyCatAll {
             overrides[newKey] = cat
-            let ids = ledger.filter { $0.key == newKey }.map { $0.id }
-            for id in ids { txOverrides[id] = nil }
+            for item in ledger where item.key == newKey { txOverrides[item.id] = nil }
         } else {
             txOverrides[t.id] = cat
         }
@@ -1352,8 +1448,7 @@ enum Sample {
         let fbVal = fixedBucket?.rawValue ?? "NONE"
         if applyFixedAll {
             fixedMerchantMap[newKey] = fbVal
-            let ids = ledger.filter { $0.key == newKey }.map { $0.id }
-            for id in ids { fixedTxMap[id] = nil }
+            for item in ledger where item.key == newKey { fixedTxMap[item.id] = nil }
         } else {
             fixedTxMap[t.id] = fbVal
         }
@@ -1363,7 +1458,6 @@ enum Sample {
         show("Updated \(Merchant.clean(cleanMerchant))", undo: u)
     }
 
-    /// Delete any spend (CSV or Manual)
     func deleteTx(_ t: Tx) {
         let u = snapshot()
         delta.deleted.insert(t.id)
@@ -1379,9 +1473,12 @@ enum Sample {
         let msg: String
         if all {
             overrides[t.key] = c
-            let ids = ledger.filter { $0.key == t.key }.map { $0.id }
-            for id in ids { txOverrides[id] = nil }
-            msg = "Moved \(ids.count) \(t.name) spend\(ids.count == 1 ? "" : "s") to \(c)"
+            var count = 0
+            for item in ledger where item.key == t.key {
+                txOverrides[item.id] = nil
+                count += 1
+            }
+            msg = "Moved \(count) \(t.name) spend\(count == 1 ? "" : "s") to \(c)"
         } else {
             txOverrides[t.id] = c
             msg = "Moved 1 spend to \(c)"
@@ -1530,10 +1627,11 @@ struct CSVExport: Transferable {
 // =====================================================================================
 
 struct Logo: View {
+    private static let hasCustomLogo = UIImage(named: "AppLogo") != nil
     var size: CGFloat = 30
     var body: some View {
         Group {
-            if UIImage(named: "AppLogo") != nil {
+            if Self.hasCustomLogo {
                 Image("AppLogo").resizable().scaledToFit()
             } else {
                 Image(systemName: "indianrupeesign.circle.fill").resizable().scaledToFit().foregroundStyle(.tint)
@@ -1545,7 +1643,7 @@ struct Logo: View {
     }
 }
 
-struct CatBadge: View {
+struct CatBadge: View, Equatable {
     let cat: String
     var size: CGFloat = 28
     var body: some View {
@@ -1558,7 +1656,7 @@ struct CatBadge: View {
     }
 }
 
-struct FixedBadge: View {
+struct FixedBadge: View, Equatable {
     let bucket: FixedBucket
     var size: CGFloat = 28
     var body: some View {
@@ -1649,7 +1747,7 @@ struct DayHeader: View {
     }
 }
 
-struct Chip: View {
+struct Chip: View, Equatable {
     let title: String
     let icon: String
     let active: Bool
@@ -1777,7 +1875,7 @@ struct BalanceCardView: View {
 // MARK: - Today
 // =====================================================================================
 
-struct WeekChart: View {
+struct WeekChart: View, Equatable {
     let days: [DayTotal]
     var body: some View {
         Chart(days) { d in
@@ -1886,7 +1984,7 @@ struct TodayView: View {
 }
 
 // =====================================================================================
-// MARK: - Monthly Fixed Expenses Sheet (New Tab)
+// MARK: - Monthly Fixed Expenses Sheet
 // =====================================================================================
 
 struct FixedExpensesView: View {
@@ -1966,7 +2064,7 @@ struct FixedExpensesView: View {
                         Text("\(pct)%").font(.caption.bold()).foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("Tap a target button or swipe any row below to set your monthly fixed amounts.")
+                    Text("Tap 'Set target' or swipe any row below to set your monthly fixed amounts.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1979,7 +2077,7 @@ struct FixedExpensesView: View {
         Section {
             ForEach(fx.items) { item in
                 NavigationLink {
-                    FixedBucketDetailScreen(item: item)
+                    FixedBucketDetailScreen(bucket: item.bucket)
                 } label: {
                     fixedRow(item)
                 }
@@ -2026,6 +2124,7 @@ struct FixedExpensesView: View {
                         }
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.indigo)
+                        .buttonStyle(.borderless)
                     }
                 }
             }
@@ -2068,35 +2167,41 @@ struct FixedExpensesView: View {
 
 struct FixedBucketDetailScreen: View {
     @Environment(Store.self) private var store
-    let item: FixedItemStat
+    let bucket: FixedBucket
+
+    private var item: FixedItemStat {
+        store.month.fixed.items.first { $0.bucket == bucket }
+            ?? FixedItemStat(bucket: bucket, spent: 0, target: nil, count: 0, txs: [])
+    }
 
     var body: some View {
-        let groups = groupByDay(item.txs)
+        let currentItem = item
+        let groups = groupByDay(currentItem.txs)
         List {
             Section {
                 HStack {
-                    FixedBadge(bucket: item.bucket, size: 36)
+                    FixedBadge(bucket: bucket, size: 36)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(store.m(item.spent))
+                        Text(store.m(currentItem.spent))
                             .font(.system(.title, design: .rounded, weight: .bold))
-                        Text(item.bucket.ruleDescription)
+                        Text(bucket.ruleDescription)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Set Target") {
-                        store.fixedBudgetTarget = FixedBudgetTarget(bucket: item.bucket)
+                        store.fixedBudgetTarget = FixedBudgetTarget(bucket: bucket)
                     }
                     .buttonStyle(.bordered)
                 }
-                if let target = item.target {
+                if let target = currentItem.target {
                     LabeledContent("Monthly Target", value: store.m(target))
-                    LabeledContent("Difference", value: item.spent > target ? "+\(store.m(item.spent - target))" : store.m(target - item.spent))
+                    LabeledContent("Difference", value: currentItem.spent > target ? "+\(store.m(currentItem.spent - target))" : store.m(target - currentItem.spent))
                 }
             }
             if groups.isEmpty {
                 Section {
-                    Text("No transactions matched for \(item.bucket.rawValue) in \(store.month.period.title).")
+                    Text("No transactions matched for \(bucket.rawValue) in \(store.month.period.title).")
                         .foregroundStyle(.secondary)
                 }
             } else {
@@ -2107,7 +2212,7 @@ struct FixedBucketDetailScreen: View {
                 }
             }
         }
-        .navigationTitle(item.bucket.rawValue)
+        .navigationTitle(bucket.rawValue)
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -2133,11 +2238,22 @@ struct TxListScreen: View {
     let title: String
     let scope: Scope
     @State private var todayOnly = false
+    @State private var groups: [DayGroup] = []
+    @State private var totalAmount: Decimal = 0
+    @State private var totalCount: Int = 0
+
+    private struct CalcKey: Equatable {
+        var version: Int
+        var anchor: Date
+        var todayOnly: Bool
+        var scope: Scope
+    }
+
+    private var calcKey: CalcKey {
+        CalcKey(version: store.version, anchor: store.month.period.anchor, todayOnly: todayOnly, scope: scope)
+    }
 
     var body: some View {
-        let all = store.month.txs.filter { scope.matches($0) }
-        let shown = todayOnly ? all.filter { Calendar.current.isDateInToday($0.date) } : all
-        let groups = groupByDay(shown)
         List {
             Section {
                 if case .bank = scope {
@@ -2147,12 +2263,12 @@ struct TxListScreen: View {
                     }.pickerStyle(.segmented)
                 }
                 HStack {
-                    Text(store.m(shown.reduce(Decimal.zero) { $1.counted ? $0 + $1.amt : $0 }))
+                    Text(store.m(totalAmount))
                         .font(.system(.title, design: .rounded, weight: .bold))
                     Spacer()
-                    Text("\(shown.count) spends").foregroundStyle(.secondary)
+                    Text("\(totalCount) spends").foregroundStyle(.secondary)
                 }
-                if shown.isEmpty { Text("No spends").foregroundStyle(.secondary) }
+                if totalCount == 0 { Text("No spends").foregroundStyle(.secondary) }
             }
             ForEach(groups) { g in
                 Section {
@@ -2162,6 +2278,13 @@ struct TxListScreen: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: calcKey, initial: true) { _, _ in
+            let all = store.month.txs.filter { scope.matches($0) }
+            let shown = todayOnly ? all.filter { Calendar.current.isDateInToday($0.date) } : all
+            totalCount = shown.count
+            totalAmount = shown.reduce(Decimal.zero) { $1.counted ? $0 + $1.amt : $0 }
+            groups = groupByDay(shown)
+        }
     }
 }
 
@@ -2523,8 +2646,9 @@ struct AddTxSheet: View {
     @State private var last4 = "0000"
     @State private var date = Date()
     @State private var cat = "Food"
-    @State private var autoCategorise = true
-    @State private var fixedBucket: FixedBucket? = nil
+    @State private var userPickedCat = false
+    @State private var userPickedFixed = false
+    @State private var fixedBucket: FixedBucket? = .food
 
     private var parsedAmount: Decimal? {
         let cleaned = amountText.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
@@ -2544,10 +2668,17 @@ struct AddTxSheet: View {
                     }
                     TextField("Merchant / Description (e.g. Bescom, Swiggy)", text: $merchant)
                         .onChange(of: merchant) { _, newVal in
-                            if autoCategorise {
-                                let detectedCat = Categorizer.category(for: newVal)
+                            let key = Merchant.key(newVal)
+                            let detectedCat = store.overrides[key] ?? Categorizer.category(for: newVal)
+                            if !userPickedCat {
                                 cat = detectedCat
-                                fixedBucket = Categorizer.fixedBucket(for: newVal, category: detectedCat)
+                            }
+                            if !userPickedFixed {
+                                if let pinned = store.fixedMerchantMap[key] {
+                                    fixedBucket = (pinned == "NONE") ? nil : FixedBucket(rawValue: pinned)
+                                } else {
+                                    fixedBucket = Categorizer.fixedBucket(for: newVal, category: userPickedCat ? cat : detectedCat)
+                                }
                             }
                         }
                     DatePicker("Date & Time", selection: $date)
@@ -2556,8 +2687,7 @@ struct AddTxSheet: View {
                 Section("Payment Method") {
                     if !store.sources.isEmpty {
                         Menu {
-                            ForEach(store.sources.indices, id: \.self) { idx in
-                                let pair = store.sources[idx]
+                            ForEach(store.sources) { pair in
                                 Button("\(pair.src) (\(pair.last4))") {
                                     src = pair.src
                                     last4 = pair.last4
@@ -2579,17 +2709,30 @@ struct AddTxSheet: View {
                 }
 
                 Section("Category & Fixed Expense Sheet") {
-                    Picker("Category", selection: $cat) {
+                    Picker("Category", selection: Binding(
+                        get: { cat },
+                        set: { newCat in
+                            userPickedCat = true
+                            cat = newCat
+                            if !userPickedFixed {
+                                if newCat == "Food" { fixedBucket = .food }
+                                else if newCat == "Groceries" { fixedBucket = .groceries }
+                                else if fixedBucket == .food || fixedBucket == .groceries { fixedBucket = nil }
+                            }
+                        }
+                    )) {
                         ForEach(Cats.names, id: \.self) { n in
                             Label(n, systemImage: Cats.symbol(n)).tag(n)
                         }
                     }
-                    .onChange(of: cat) { _, newCat in
-                        if newCat == "Food" { fixedBucket = .food }
-                        else if newCat == "Groceries" { fixedBucket = .groceries }
-                    }
 
-                    Picker("Fixed Monthly Bucket", selection: $fixedBucket) {
+                    Picker("Fixed Monthly Bucket", selection: Binding(
+                        get: { fixedBucket },
+                        set: { newBucket in
+                            userPickedFixed = true
+                            fixedBucket = newBucket
+                        }
+                    )) {
                         Text("None (Not a Fixed Expense)").tag(Optional<FixedBucket>.none)
                         ForEach(FixedBucket.allCases) { b in
                             Label(b.rawValue, systemImage: b.symbol).tag(Optional(b))
@@ -2654,6 +2797,10 @@ struct TxDetail: View {
     }
 
     var body: some View {
+        let currentKey = Merchant.key(merchant)
+        let matchCount = store.keyCounts[currentKey, default: 0]
+        let cleanName = Merchant.clean(merchant)
+
         NavigationStack {
             Form {
                 Section("Edit Entry Details") {
@@ -2676,9 +2823,8 @@ struct TxDetail: View {
                             Label(n, systemImage: Cats.symbol(n)).tag(n)
                         }
                     }
-                    let matchCount = store.ledger.filter { $0.key == Merchant.key(merchant) }.count
                     if matchCount > 1 {
-                        Toggle("Apply category to all “\(Merchant.clean(merchant))” (\(matchCount))", isOn: $applyCatAll)
+                        Toggle("Apply category to all “\(cleanName)” (\(matchCount))", isOn: $applyCatAll)
                     }
                 }
 
@@ -2689,9 +2835,8 @@ struct TxDetail: View {
                             Label(b.rawValue, systemImage: b.symbol).tag(Optional(b))
                         }
                     }
-                    let matchCount = store.ledger.filter { $0.key == Merchant.key(merchant) }.count
                     if matchCount > 1 {
-                        Toggle("Always map “\(Merchant.clean(merchant))” to this fixed sheet", isOn: $applyFixedAll)
+                        Toggle("Always map “\(cleanName)” to this fixed sheet", isOn: $applyFixedAll)
                     }
                 } header: {
                     Text("Monthly Fixed Expense Tracking")
@@ -3236,4 +3381,3 @@ struct RootView: View {
         }
     }
 }
-
