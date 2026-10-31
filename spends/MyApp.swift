@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 //  Spends – iOS 17+
 //  CSV line format:  2026-10-01 11:40, Source|Last4|Amount|Merchant
 //  Structure:  Models → Formatting → Categoriser → Engine (actor, off-main parsing)
-//              → Store (@Observable) → Views (Today / Month / Spends / Settings)
+//              → Store (@Observable) → Views (Today / Fixed / Month / Spends / Settings)
 // =====================================================================================
 
 // MARK: - Constants
@@ -26,6 +26,13 @@ enum Keys {
     static let masked = "mask"
     static let cover = "cover"
     static let lock = "lock"
+    // New keys for CRUD, Fixed Expenses & Bank Balance
+    static let fixedTargets = "fxt"
+    static let fixedMerchantMap = "fxm"
+    static let fixedTxMap = "fxtx"
+    static let bankBalance = "bbal"
+    static let bankBalanceDate = "bbal_dt"
+    static let bankBalanceMode = "bbal_mode" // "sinceDate" or "month"
 }
 
 enum Cats {
@@ -43,6 +50,56 @@ enum Cats {
     static var names: [String] { all.map { $0.name } }
     static func color(_ n: String) -> Color { all.first { $0.name == n }?.color ?? .gray }
     static func symbol(_ n: String) -> String { all.first { $0.name == n }?.symbol ?? "circle" }
+}
+
+// MARK: - Fixed Expense Buckets (Auto-detected + Manual Pinning)
+
+enum FixedBucket: String, CaseIterable, Identifiable, Codable, Sendable {
+    case rent = "Rent"
+    case home = "Home"
+    case elecFlat = "Electricity Bill Flat"
+    case elecHome = "Electricity Bill Home"
+    case fuel = "Fuel"
+    case food = "Food"
+    case groceries = "Groceries"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .rent: return "building.2.fill"
+        case .home: return "house.fill"
+        case .elecFlat: return "bolt.fill"
+        case .elecHome: return "bolt.circle.fill"
+        case .fuel: return "fuelpump.fill"
+        case .food: return "fork.knife"
+        case .groceries: return "cart.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .rent: return .indigo
+        case .home: return .teal
+        case .elecFlat: return .yellow
+        case .elecHome: return .orange
+        case .fuel: return .blue
+        case .food: return .pink
+        case .groceries: return .green
+        }
+    }
+
+    var ruleDescription: String {
+        switch self {
+        case .food: return "Auto-tracks all Food category spends"
+        case .groceries: return "Auto-tracks all Groceries category spends"
+        case .fuel: return "Auto-tracks fuel/petrol spends & pinned merchants"
+        case .rent: return "Auto-tracks rent keywords & pinned merchants"
+        case .home: return "Auto-tracks home maintenance & pinned merchants"
+        case .elecFlat: return "Auto-tracks flat electricity keywords & pinned spends"
+        case .elecHome: return "Auto-tracks home electricity keywords & pinned spends"
+        }
+    }
 }
 
 // MARK: - Formatting (Indian grouping, paise-aware)
@@ -145,17 +202,15 @@ enum Merchant {
 }
 
 enum Categorizer {
-    // Edit freely. Short alphanumeric keywords (≤5 chars) match whole words only,
-    // so "ola" no longer hits "Coca Cola" and "cred" no longer hits "Credit Card".
     static let rules: [(String, [String])] = [
-        ("Food", ["swiggy", "zomato", "restaurant", "cafe", "kfc", "domino", "pizza", "starbucks", "bakery"]),
-        ("Groceries", ["blinkit", "zepto", "bigbasket", "instamart", "dmart", "grocer"]),
-        ("Transport", ["uber", "ola", "olacabs", "rapido", "irctc", "fuel", "petrol", "metro", "redbus", "fastag", "mmt"]),
-        ("Shopping", ["amazon", "flipkart", "myntra", "ajio", "nykaa"]),
-        ("Bills", ["jio", "airtel", "electric", "bescom", "recharge", "cred", "insurance", "rent", "raz*", "furnish"]),
-        ("Health", ["pharm", "apollo", "hospital", "clinic", "medic", "1mg"]),
-        ("Fun", ["netflix", "spotify", "bookmyshow", "prime", "hotstar"]),
-        ("Transfers", ["a/c", "account"])
+        ("Food", ["swiggy", "zomato", "restaurant", "cafe", "kfc", "domino", "pizza", "starbucks", "bakery", "eatfit", "mcdonald", "burger"]),
+        ("Groceries", ["blinkit", "zepto", "bigbasket", "instamart", "dmart", "grocer", "ratnadeep", "reliance smart", "more supermarket"]),
+        ("Transport", ["uber", "ola", "olacabs", "rapido", "irctc", "fuel", "petrol", "shell", "hpcl", "bpcl", "iocl", "indian oil", "bharat petroleum", "hindustan petroleum", "metro", "redbus", "fastag", "mmt"]),
+        ("Shopping", ["amazon", "flipkart", "myntra", "ajio", "nykaa", "decathlon", "uniqlo", "zara"]),
+        ("Bills", ["jio", "airtel", "electric", "bescom", "mahadiscom", "tata power", "adani elec", "ebill", "recharge", "cred", "insurance", "rent", "nobroker", "nestaway", "raz*", "furnish", "society", "maintenance", "urban company", "ikea", "home centre"]),
+        ("Health", ["pharm", "apollo", "hospital", "clinic", "medic", "1mg", "medplus", "practo"]),
+        ("Fun", ["netflix", "spotify", "bookmyshow", "prime", "hotstar", "pvr", "inox"]),
+        ("Transfers", ["a/c", "account", "upi transfer", "self transfer", "neft", "imps"])
     ]
 
     private static let compiled: [(String, NSRegularExpression)] = rules.map { cat, keys in
@@ -168,11 +223,46 @@ enum Categorizer {
         return (cat, rx)
     }
 
-    /// Matches the merchant only – never the card name.
     static func category(for merchant: String) -> String {
         let r = NSRange(merchant.startIndex..., in: merchant)
         for (c, rx) in compiled where rx.firstMatch(in: merchant, options: [], range: r) != nil { return c }
         return "Other"
+    }
+
+    // Auto-detect Fixed Expense Bucket from merchant text & resolved category
+    private static let fuelRx = try! NSRegularExpression(
+        pattern: "(?<![a-z0-9])(fuel|petrol|diesel|shell|hpcl|bpcl|iocl|indian oil|bharat petroleum|hindustan petroleum)(?![a-z0-9])",
+        options: [.caseInsensitive]
+    )
+    private static let rentRx = try! NSRegularExpression(
+        pattern: "(?<![a-z0-9])(rent|house rent|flat rent|nobroker|nestaway|stanza|landlord)(?![a-z0-9])",
+        options: [.caseInsensitive]
+    )
+    private static let elecHomeRx = try! NSRegularExpression(
+        pattern: "(?<![a-z0-9])(electricity home|eb home|home electric|home bescom|parents electric)(?![a-z0-9])",
+        options: [.caseInsensitive]
+    )
+    private static let elecFlatRx = try! NSRegularExpression(
+        pattern: "(?<![a-z0-9])(bescom|electric|electricity|ebill|mahadiscom|tata power|adani elec|cesc|tneb|mseb|kseb)(?![a-z0-9])",
+        options: [.caseInsensitive]
+    )
+    private static let homeRx = try! NSRegularExpression(
+        pattern: "(?<![a-z0-9])(home|maintenance|society|mygate|adda|urban company|urbanclap|ikea|furnish|maid|cook|water bill|gas bill|indane|bharatgas|hp gas)(?![a-z0-9])",
+        options: [.caseInsensitive]
+    )
+
+    static func fixedBucket(for merchant: String, category: String) -> FixedBucket? {
+        let r = NSRange(merchant.startIndex..., in: merchant)
+        // Check specific keyword matches first
+        if rentRx.firstMatch(in: merchant, options: [], range: r) != nil { return .rent }
+        if elecHomeRx.firstMatch(in: merchant, options: [], range: r) != nil { return .elecHome }
+        if elecFlatRx.firstMatch(in: merchant, options: [], range: r) != nil { return .elecFlat }
+        if fuelRx.firstMatch(in: merchant, options: [], range: r) != nil { return .fuel }
+        if homeRx.firstMatch(in: merchant, options: [], range: r) != nil { return .home }
+        // Category-level auto-mapping for Food and Groceries
+        if category == "Food" { return .food }
+        if category == "Groceries" { return .groceries }
+        return nil
     }
 }
 
@@ -192,6 +282,22 @@ func bankName(_ src: String) -> String {
 
 // MARK: - Models
 
+struct CustomTxRecord: Codable, Sendable, Equatable {
+    var id: String
+    var date: Date
+    var src: String
+    var last4: String
+    var amt: Decimal
+    var merchant: String
+    var isManual: Bool
+}
+
+struct LocalDeltaStore: Codable, Sendable {
+    var custom: [CustomTxRecord] = []         // User-added transactions
+    var edits: [String: CustomTxRecord] = [:] // Edits to CSV or manual transactions keyed by ID
+    var deleted: Set<String> = []             // Deleted transaction IDs
+}
+
 struct Tx: Identifiable, Sendable {
     enum Reason: Sendable {
         case excluded, duplicate, transfer
@@ -208,22 +314,25 @@ struct Tx: Identifiable, Sendable {
     let src: String
     let last4: String
     let amt: Decimal
-    let merchant: String      // raw text from the CSV
+    let merchant: String      // raw text from the CSV or user input
     let name: String          // cleaned for display
     let key: String           // used for "apply to all"
     let bank: String
     let auto: String          // automatic category
     let hay: String           // lowercase search text
     var cat: String           // effective category (after overrides)
+    var fixedBucket: FixedBucket? // effective fixed expense bucket (auto or manual)
+    var isManual: Bool = false
+    var isEdited: Bool = false
     var reason: Reason?       // nil = counted in totals
     var counted: Bool { reason == nil }
 
-    static func make(id: String, date: Date, src: String, last4: String, amt: Decimal, merchant: String) -> Tx {
+    static func make(id: String, date: Date, src: String, last4: String, amt: Decimal, merchant: String, isManual: Bool = false, isEdited: Bool = false) -> Tx {
         let auto = Categorizer.category(for: merchant)
         let hay = "\(merchant) \(src) \(last4) \(amt)".lowercased()
         return Tx(id: id, date: date, src: src, last4: last4, amt: amt, merchant: merchant,
                   name: Merchant.clean(merchant), key: Merchant.key(merchant), bank: bankName(src),
-                  auto: auto, hay: hay, cat: auto)
+                  auto: auto, hay: hay, cat: auto, fixedBucket: nil, isManual: isManual, isEdited: isEdited)
     }
 }
 
@@ -263,8 +372,40 @@ struct MerchantTotal: Identifiable { let id: String; let total: Decimal; let cou
 struct Recurring: Identifiable { let id: String; let name: String; let amount: Decimal; let count: Int }
 struct ReviewItem: Identifiable { let id: String; let name: String; let count: Int; let total: Decimal }
 struct BudgetTarget: Identifiable { let id: String }
+struct FixedBudgetTarget: Identifiable { let bucket: FixedBucket; var id: String { bucket.rawValue } }
 struct Toast: Identifiable { let id = UUID(); let text: String; let canUndo: Bool }
 struct DayGroup: Identifiable { let date: Date; let items: [Tx]; let total: Decimal; var id: Date { date } }
+
+struct FixedItemStat: Identifiable {
+    let bucket: FixedBucket
+    var spent: Decimal
+    var target: Decimal?
+    var count: Int
+    var txs: [Tx]
+    var id: String { bucket.rawValue }
+    var remaining: Decimal? {
+        guard let t = target else { return nil }
+        return max(t - spent, 0)
+    }
+}
+
+struct FixedMonthSummary {
+    var items: [FixedItemStat] = []
+    var totalSpent: Decimal = 0
+    var totalBudgeted: Decimal = 0
+    var unpaidRemaining: Decimal = 0 // Sum of remaining targets for buckets not yet fully spent
+}
+
+struct BalanceStatus {
+    var isConfigured: Bool = false
+    var startingBalance: Decimal = 0
+    var asOfDate: Date = .now
+    var mode: String = "month" // "month" or "sinceDate"
+    var spentAgainstBalance: Decimal = 0
+    var realRemaining: Decimal = 0
+    var unpaidFixedCommitments: Decimal = 0
+    var safeToSpend: Decimal = 0
+}
 
 struct MonthStats {
     var period: Period
@@ -281,6 +422,7 @@ struct MonthStats {
     var biggest: Tx?
     var merchants: [MerchantTotal] = []
     var busiestDay: String?
+    var fixed = FixedMonthSummary()
     var summary: String {
         var s = "Spends – \(period.title)\nTotal: \(inr(total))\n"
         for c in cats where c.value != 0 { s += "\(c.id): \(inr(c.value))\n" }
@@ -402,7 +544,7 @@ actor Engine {
         guard let b = UserDefaults.standard.data(forKey: Keys.bookmark) else { return .none }
         var stale = false
         guard let url = try? URL(resolvingBookmarkData: b, bookmarkDataIsStale: &stale) else { return .missing }
-        if stale {   // refresh the bookmark so it never silently expires
+        if stale {
             let ok = url.startAccessingSecurityScopedResource()
             if let nb = try? url.bookmarkData() { UserDefaults.standard.set(nb, forKey: Keys.bookmark) }
             if ok { url.stopAccessingSecurityScopedResource() }
@@ -410,7 +552,6 @@ actor Engine {
         return .url(url)
     }
 
-    /// Reads on a background queue; skips the read entirely when modification date and size are unchanged.
     private static func read(_ url: URL, last: Stamp?) async -> ReadOutcome {
         await withCheckedContinuation { (cont: CheckedContinuation<ReadOutcome, Never>) in
             DispatchQueue.global(qos: .utility).async {
@@ -457,7 +598,6 @@ actor Engine {
         if !incremental {
             committed = []; seen = [:]; parsedBytes = 0; tailSig = Data(); bad = 0; dayCache = [:]
         }
-        // Commit only complete lines
         if let nl = data[parsedBytes..<n].lastIndex(of: 0x0A) {
             let end = nl + 1
             let parsed = parseChunk(data[parsedBytes..<end], seen: &seen, bad: &bad)
@@ -466,7 +606,7 @@ actor Engine {
             tailSig = data.subdata(in: max(0, end - 64)..<end)
         }
         var result = committed
-        if parsedBytes < n {   // last line without a newline yet: show it, don't commit it
+        if parsedBytes < n {
             var tmpSeen = seen
             var tmpBad = 0
             result.append(contentsOf: parseChunk(data[parsedBytes..<n], seen: &tmpSeen, bad: &tmpBad))
@@ -480,7 +620,6 @@ actor Engine {
         for line in text.split(whereSeparator: \.isNewline) {
             if line.allSatisfy(\.isWhitespace) { continue }
             guard let p = parseLine(line) else { bad += 1; continue }
-            // Stable id: the raw line plus an occurrence counter (handles genuine duplicates)
             let key = String(line)
             let n = seen[key, default: 0]
             seen[key] = n + 1
@@ -501,7 +640,6 @@ actor Engine {
         return (date, p[0], p[1], amt, p[3...].joined(separator: "|"))
     }
 
-    /// "yyyy-MM-dd HH:mm" without a DateFormatter per line (day start is cached)
     private func parseDate(_ s: Substring) -> Date? {
         let t = s.trimmingCharacters(in: .whitespaces)
         guard t.count >= 16 else { return nil }
@@ -537,13 +675,13 @@ enum Sample {
         let cards = [("HDFC Credit Card", "4321"), ("AU Bank Credit Card", "8890"), ("SBI Account", "1122")]
         let pool: [(String, Int, Int)] = [
             ("SWIGGY*ORD", 180, 650), ("ZOMATO", 200, 700), ("BLINKIT", 250, 1400), ("UBER *TRIP", 120, 480),
-            ("AMAZON PAY INDIA", 300, 3500), ("MYNTRA", 700, 2800), ("APOLLO PHARMACY", 150, 900),
-            ("BOOKMYSHOW", 300, 900), ("STARBUCKS", 250, 600), ("IRCTC", 400, 2200), ("Coca Cola Stall", 40, 120)
+            ("SHELL PETROL PUMP", 600, 2500), ("AMAZON PAY INDIA", 300, 3500), ("MYNTRA", 700, 2800),
+            ("APOLLO PHARMACY", 150, 900), ("BOOKMYSHOW", 300, 900), ("STARBUCKS", 250, 600), ("IRCTC", 400, 2200)
         ]
         var out: [Tx] = []
         for day in 0..<130 {
             guard let d0 = cal.date(byAdding: .day, value: -day, to: sod) else { continue }
-            let count = Int.random(in: 1...4, using: &rng)
+            let count = Int.random(in: 1...3, using: &rng)
             for i in 0..<count {
                 let item = pool.randomElement(using: &rng)!
                 let card = cards.randomElement(using: &rng)!
@@ -555,11 +693,23 @@ enum Sample {
                                    amt: Decimal(amt), merchant: merchant))
             }
             let dom = cal.component(.day, from: d0)
-            if dom == 5, let date = cal.date(byAdding: .minute, value: 9 * 60, to: d0) {
+            if dom == 2, let date = cal.date(byAdding: .minute, value: 9 * 60, to: d0), date <= .now {
+                out.append(Tx.make(id: "sample-rent-\(day)", date: date, src: cards[2].0, last4: cards[2].1, amt: 28000, merchant: "HOUSE RENT NOBROKER"))
+            }
+            if dom == 5, let date = cal.date(byAdding: .minute, value: 9 * 60, to: d0), date <= .now {
                 out.append(Tx.make(id: "sample-nf-\(day)", date: date, src: cards[0].0, last4: cards[0].1, amt: 649, merchant: "NETFLIX.COM"))
             }
-            if dom == 12, let date = cal.date(byAdding: .minute, value: 10 * 60, to: d0) {
+            if dom == 8, let date = cal.date(byAdding: .minute, value: 11 * 60, to: d0), date <= .now {
+                out.append(Tx.make(id: "sample-bescom-\(day)", date: date, src: cards[2].0, last4: cards[2].1, amt: 1850, merchant: "BESCOM ELECTRICITY BILL"))
+            }
+            if dom == 10, let date = cal.date(byAdding: .minute, value: 14 * 60, to: d0), date <= .now {
+                out.append(Tx.make(id: "sample-ebhome-\(day)", date: date, src: cards[2].0, last4: cards[2].1, amt: 2400, merchant: "ELECTRICITY HOME BILL"))
+            }
+            if dom == 12, let date = cal.date(byAdding: .minute, value: 10 * 60, to: d0), date <= .now {
                 out.append(Tx.make(id: "sample-jio-\(day)", date: date, src: cards[1].0, last4: cards[1].1, amt: 299, merchant: "JIO RECHARGE"))
+            }
+            if dom == 15, let date = cal.date(byAdding: .minute, value: 16 * 60, to: d0), date <= .now {
+                out.append(Tx.make(id: "sample-home-\(day)", date: date, src: cards[2].0, last4: cards[2].1, amt: 3500, merchant: "MYGATE SOCIETY MAINTENANCE"))
             }
         }
         return out.sorted { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
@@ -575,8 +725,10 @@ enum Sample {
     var ledger: [Tx] = []
     var hasData = false
     var banks: [String] = []
+    var sources: [(src: String, last4: String)] = []
     var today = TodayStats()
     var month = MonthStats(period: Period.placeholder)
+    var balanceStatus = BalanceStatus()
     var periods: [Period] = []
     var history: [PeriodTotal] = []
     var recurring: [Recurring] = []
@@ -589,18 +741,27 @@ enum Sample {
     var skipped = 0
     var newSpendTick = 0
 
-    // UI
+    // UI Sheets & Navigation
     var detailTx: Tx?
+    var showAddSheet = false
+    var showBalanceSheet = false
     var budgetTarget: BudgetTarget?
+    var fixedBudgetTarget: FixedBudgetTarget?
     var showPicker = false
     var toast: Toast?
     var locked = false
 
-    // Settings (persisted)
+    // Settings & Rules (persisted)
     var overrides: [String: String] = [:]
     var txOverrides: [String: String] = [:]
     var excluded: Set<String> = []
     var budgets: [String: Double] = [:]
+    var fixedTargets: [String: Double] = [:]       // FixedBucket.rawValue -> Monthly target
+    var fixedMerchantMap: [String: String] = [:]   // Merchant.key -> FixedBucket.rawValue
+    var fixedTxMap: [String: String] = [:]         // Tx.id -> FixedBucket.rawValue ("NONE" to unpin)
+    var bankBalance: Double?
+    var bankBalanceDate: Date = .now
+    var bankBalanceMode: String = "month"          // "month" or "sinceDate"
     var hideTransfers = false
     var dedupe = false
     var cycleDay = 1
@@ -608,6 +769,8 @@ enum Sample {
     var coverEnabled = true
     var lockEnabled = false
 
+    // Local CRUD Delta Store
+    @ObservationIgnored private var delta = LocalDeltaStore()
     @ObservationIgnored private var raw: [Tx] = []
     @ObservationIgnored private let engine = Engine()
     @ObservationIgnored private var loaded = false
@@ -622,17 +785,35 @@ enum Sample {
     @ObservationIgnored private var needsPrompt = false
     @ObservationIgnored private var unlocking = false
 
-    private struct Undo { var ov: [String: String]; var tov: [String: String]; var ex: Set<String> }
+    private struct Undo {
+        var ov: [String: String]
+        var tov: [String: String]
+        var ex: Set<String>
+        var fxm: [String: String]
+        var fxtx: [String: String]
+        var delta: LocalDeltaStore
+    }
+
+    private var deltaFileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("spends-local-delta.json")
+    }
 
     init() {
         let d = UserDefaults.standard
-        // Old overrides were keyed by the uppercased raw merchant; normalise them to the new key
         var ov: [String: String] = [:]
         for (k, v) in (d.dictionary(forKey: Keys.overrides) as? [String: String] ?? [:]) { ov[Merchant.key(k)] = v }
         overrides = ov
         txOverrides = d.dictionary(forKey: Keys.txOverrides) as? [String: String] ?? [:]
         excluded = Set(d.stringArray(forKey: Keys.excluded) ?? [])
         budgets = d.dictionary(forKey: Keys.budgets) as? [String: Double] ?? [:]
+        fixedTargets = d.dictionary(forKey: Keys.fixedTargets) as? [String: Double] ?? [:]
+        fixedMerchantMap = d.dictionary(forKey: Keys.fixedMerchantMap) as? [String: String] ?? [:]
+        fixedTxMap = d.dictionary(forKey: Keys.fixedTxMap) as? [String: String] ?? [:]
+        if let bal = d.object(forKey: Keys.bankBalance) as? Double { bankBalance = bal }
+        if let bdt = d.object(forKey: Keys.bankBalanceDate) as? Date { bankBalanceDate = bdt }
+        bankBalanceMode = d.string(forKey: Keys.bankBalanceMode) ?? "month"
         hideTransfers = d.bool(forKey: Keys.hideTransfers)
         dedupe = d.bool(forKey: Keys.dedupe)
         let c = d.integer(forKey: Keys.cycleDay)
@@ -641,7 +822,14 @@ enum Sample {
         coverEnabled = d.object(forKey: Keys.cover) as? Bool ?? true
         lockEnabled = d.bool(forKey: Keys.lock)
         if lockEnabled { locked = true; needsPrompt = true }
+
+        if let data = try? Data(contentsOf: deltaFileURL),
+           let loadedDelta = try? JSONDecoder().decode(LocalDeltaStore.self, from: data) {
+            delta = loadedDelta
+        }
+
         month = MonthStats(period: period(containing: now))
+        if !delta.custom.isEmpty { recompute() }
     }
 
     func m(_ d: Decimal) -> String { masked ? "₹•••••" : inr(d) }
@@ -695,6 +883,22 @@ enum Sample {
 
     func useSample() {
         isSample = true
+        if fixedTargets.isEmpty {
+            fixedTargets = [
+                FixedBucket.rent.rawValue: 28000,
+                FixedBucket.home.rawValue: 4000,
+                FixedBucket.elecFlat.rawValue: 2000,
+                FixedBucket.elecHome.rawValue: 2500,
+                FixedBucket.fuel.rawValue: 4000,
+                FixedBucket.food.rawValue: 8000,
+                FixedBucket.groceries.rawValue: 6000
+            ]
+        }
+        if bankBalance == nil {
+            bankBalance = 145000
+            bankBalanceDate = period(containing: now).start
+            bankBalanceMode = "month"
+        }
         apply(Sample.make(), bad: 0)
         sync = .sample
     }
@@ -710,7 +914,6 @@ enum Sample {
         loaded = true
     }
 
-    /// Midnight rollover: "Today" and the current month stay correct without any file change
     func tickNow() {
         let n = Date()
         cal = Calendar.current
@@ -764,7 +967,7 @@ enum Sample {
     }
 
     private func dayIndex(_ d: Date) -> Int {
-        Int(floor((d.timeIntervalSinceReferenceDate + Double(cal.timeZone.secondsFromGMT(for: d))) / 86400))
+        cal.ordinality(of: .day, in: .era, for: d) ?? Int(floor(d.timeIntervalSinceReferenceDate / 86400))
     }
 
     private func anchor(of d: Date) -> Date {
@@ -783,39 +986,87 @@ enum Sample {
         return (total, min(max(e, 1), total))
     }
 
-    // MARK: Recompute (single pass each; never inside a view body)
+    // MARK: Recompute (merges CSV raw + local CRUD deltas + categories + Fixed Buckets)
 
-    /// Resolve categories/exclusions, then rebuild everything derived from the ledger.
     func recompute() {
         version &+= 1
         let ov = overrides, tov = txOverrides, ex = excluded, hide = hideTransfers
-        var l = raw
-        for i in l.indices {
-            let c = tov[l[i].id] ?? ov[l[i].key] ?? l[i].auto
-            l[i].cat = c
-            if ex.contains(l[i].id) { l[i].reason = .excluded }
-            else if hide && c == "Transfers" { l[i].reason = .transfer }
-            else { l[i].reason = nil }
+        let fxm = fixedMerchantMap, fxtx = fixedTxMap
+
+        // 1. Merge CSV transactions with local edits and deletions
+        var merged: [Tx] = []
+        merged.reserveCapacity(raw.count + delta.custom.count)
+
+        for item in raw where !delta.deleted.contains(item.id) {
+            if let edit = delta.edits[item.id] {
+                merged.append(Tx.make(id: item.id, date: edit.date, src: edit.src, last4: edit.last4,
+                                      amt: edit.amt, merchant: edit.merchant, isManual: false, isEdited: true))
+            } else {
+                merged.append(item)
+            }
         }
-        if dedupe {   // same card + amount + merchant within 2 minutes → counted once
+
+        // 2. Append user-created manual transactions
+        for manual in delta.custom where !delta.deleted.contains(manual.id) {
+            let rec = delta.edits[manual.id] ?? manual
+            merged.append(Tx.make(id: rec.id, date: rec.date, src: rec.src, last4: rec.last4,
+                                  amt: rec.amt, merchant: rec.merchant, isManual: true, isEdited: delta.edits[manual.id] != nil))
+        }
+
+        // Sort newest first
+        merged.sort { a, b in a.date != b.date ? a.date > b.date : a.id > b.id }
+
+        // 3. Apply categories, fixed buckets, and exclusions
+        for i in merged.indices {
+            let c = tov[merged[i].id] ?? ov[merged[i].key] ?? merged[i].auto
+            merged[i].cat = c
+
+            // Resolve Fixed Expense Bucket: Tx Pin -> Merchant Pin -> Auto-detection
+            if let pinned = fxtx[merged[i].id] {
+                merged[i].fixedBucket = (pinned == "NONE") ? nil : FixedBucket(rawValue: pinned)
+            } else if let mPinned = fxm[merged[i].key] {
+                merged[i].fixedBucket = (mPinned == "NONE") ? nil : FixedBucket(rawValue: mPinned)
+            } else {
+                merged[i].fixedBucket = Categorizer.fixedBucket(for: merged[i].merchant, category: c)
+            }
+
+            if ex.contains(merged[i].id) { merged[i].reason = .excluded }
+            else if hide && c == "Transfers" { merged[i].reason = .transfer }
+            else { merged[i].reason = nil }
+        }
+
+        if dedupe {
             var last: [String: Date] = [:]
-            for i in l.indices.reversed() {   // oldest first
-                let t = l[i]
+            for i in merged.indices.reversed() {
+                let t = merged[i]
                 let sig = "\(t.src)|\(t.last4)|\(t.amt)|\(t.key)"
-                if let d = last[sig], t.date.timeIntervalSince(d) < 120 {
-                    if l[i].reason == nil { l[i].reason = .duplicate }
+                if let d = last[sig], abs(t.date.timeIntervalSince(d)) < 120 {
+                    if merged[i].reason == nil { merged[i].reason = .duplicate }
                 } else {
                     last[sig] = t.date
                 }
             }
         }
-        ledger = l
-        hasData = !l.isEmpty
-        banks = Set(l.map { $0.bank }).sorted()
+
+        ledger = merged
+        hasData = !merged.isEmpty
+        banks = Set(merged.map { $0.bank }).sorted()
+
+        // Distinct (src, last4) pairs for quick picker when adding manual entries
+        var seenSrc = Set<String>()
+        var srcList: [(src: String, last4: String)] = []
+        for t in merged {
+            let k = "\(t.src)|\(t.last4)"
+            if !seenSrc.contains(k) && !t.src.isEmpty {
+                seenSrc.insert(k)
+                srcList.append((t.src, t.last4))
+            }
+        }
+        sources = srcList
 
         // Needs-a-category inbox
         var rv: [String: (name: String, n: Int, total: Decimal)] = [:]
-        for t in l where t.cat == "Other" && ov[t.key] == nil && tov[t.id] == nil && t.counted {
+        for t in merged where t.cat == "Other" && ov[t.key] == nil && tov[t.id] == nil && t.counted {
             let e = rv[t.key] ?? (t.name, 0, Decimal.zero)
             rv[t.key] = (e.name, e.n + 1, e.total + t.amt)
         }
@@ -825,10 +1076,10 @@ enum Sample {
 
         // Totals per period (history chart)
         var tot: [Date: Decimal] = [:]
-        for t in l where t.counted { tot[anchor(of: t.date), default: 0] += t.amt }
+        for t in merged where t.counted { tot[anchor(of: t.date), default: 0] += t.amt }
         history = tot.map { PeriodTotal(anchor: $0.key, total: $0.value) }.sorted { $0.anchor < $1.anchor }
 
-        recurring = detectRecurring(l)
+        recurring = detectRecurring(merged)
         derive()
     }
 
@@ -856,7 +1107,6 @@ enum Sample {
         return arr.indices.map { Part(id: arr[$0].0, value: arr[$0].1, pct: pc[$0], color: color(arr[$0].0)) }
     }
 
-    /// Cheap rebuild of today + selected month (runs when month, day or ledger changes)
     func derive() {
         cal = Calendar.current
         let cur = period(containing: now)
@@ -869,7 +1119,6 @@ enum Sample {
         let counted = inPeriod.filter { $0.counted }
         let total = counted.reduce(Decimal.zero) { $0 + $1.amt }
 
-        // Compare the same number of days of the previous period
         let prevAnchor = cal.date(byAdding: .month, value: -1, to: sel.anchor) ?? sel.anchor
         let prevStart = period(anchor: prevAnchor).start
         let prevEnd = min(cal.date(byAdding: .day, value: elapsed, to: prevStart) ?? sel.start, sel.start)
@@ -881,10 +1130,15 @@ enum Sample {
         var byDay: [Date: Decimal] = [:]
         var mt: [String: (Decimal, Int)] = [:]
         var wd: [Int: Decimal] = [:]
+        var byFixed: [FixedBucket: [Tx]] = [:]
+
         for t in counted {
             byCat[t.cat, default: 0] += t.amt
             byBank[t.bank, default: 0] += t.amt
             byDay[cal.startOfDay(for: t.date), default: 0] += t.amt
+            if let fb = t.fixedBucket {
+                byFixed[fb, default: []].append(t)
+            }
             if t.amt > 0 {
                 let e = mt[t.name] ?? (Decimal.zero, 0)
                 mt[t.name] = (e.0 + t.amt, e.1 + 1)
@@ -892,6 +1146,25 @@ enum Sample {
             }
         }
         for k in budgets.keys where k != "All" && byCat[k] == nil { byCat[k] = 0 }
+
+        // Build Fixed Expenses Summary for Selected Month
+        var fixedItems: [FixedItemStat] = []
+        var fixedSpentTotal = Decimal.zero
+        var fixedBudgetTotal = Decimal.zero
+        var unpaidFixed = Decimal.zero
+
+        for bucket in FixedBucket.allCases {
+            let bucketTxs = byFixed[bucket] ?? []
+            let spent = bucketTxs.reduce(Decimal.zero) { $0 + $1.amt }
+            let targetDec = fixedTargets[bucket.rawValue].map { Decimal($0) }
+            fixedSpentTotal += spent
+            if let td = targetDec {
+                fixedBudgetTotal += td
+                let rem = max(td - spent, 0)
+                unpaidFixed += rem
+            }
+            fixedItems.append(FixedItemStat(bucket: bucket, spent: spent, target: targetDec, count: bucketTxs.count, txs: bucketTxs))
+        }
 
         let bankList = banks
         let dayRows = byDay.map { ($0.key, $0.value) }.sorted { $0.0 > $1.0 }
@@ -918,6 +1191,7 @@ enum Sample {
         if counted.count >= 7, let top = wd.max(by: { $0.value < $1.value }) {
             ms.busiestDay = cal.weekdaySymbols[top.key - 1]
         }
+        ms.fixed = FixedMonthSummary(items: fixedItems, totalSpent: fixedSpentTotal, totalBudgeted: fixedBudgetTotal, unpaidRemaining: unpaidFixed)
         month = ms
 
         var set = Set(history.map { $0.anchor })
@@ -949,12 +1223,57 @@ enum Sample {
             if histDays >= 3 { avg = sum30 / Decimal(histDays) }
         }
 
+        let curTotal: Decimal = isCur ? total : ledger.reduce(Decimal.zero) {
+            ($1.counted && $1.date >= cur.start && $1.date < cur.end) ? $0 + $1.amt : $0
+        }
+
+        // Compute current month's unpaid fixed expenses if viewing a past month
+        let curUnpaidFixed: Decimal
+        if isCur {
+            curUnpaidFixed = unpaidFixed
+        } else {
+            var curByFixed: [FixedBucket: Decimal] = [:]
+            for t in ledger where t.counted && t.date >= cur.start && t.date < cur.end {
+                if let fb = t.fixedBucket { curByFixed[fb, default: 0] += t.amt }
+            }
+            var uf = Decimal.zero
+            for b in FixedBucket.allCases {
+                if let td = fixedTargets[b.rawValue].map({ Decimal($0) }) {
+                    uf += max(td - (curByFixed[b] ?? 0), 0)
+                }
+            }
+            curUnpaidFixed = uf
+        }
+
+        // ---- Real Bank Balance Calculation
+        if let bal = bankBalance {
+            let startBal = Decimal(bal)
+            let spentAgainst: Decimal
+            if bankBalanceMode == "sinceDate" {
+                spentAgainst = ledger.reduce(Decimal.zero) {
+                    ($1.counted && $1.date >= bankBalanceDate) ? $0 + $1.amt : $0
+                }
+            } else {
+                spentAgainst = curTotal
+            }
+            let realRem = startBal - spentAgainst
+            balanceStatus = BalanceStatus(
+                isConfigured: true,
+                startingBalance: startBal,
+                asOfDate: bankBalanceDate,
+                mode: bankBalanceMode,
+                spentAgainstBalance: spentAgainst,
+                realRemaining: realRem,
+                unpaidFixedCommitments: curUnpaidFixed,
+                safeToSpend: realRem - curUnpaidFixed
+            )
+        } else {
+            balanceStatus = BalanceStatus(isConfigured: false)
+        }
+
         var allowance: Decimal?
         var left: Decimal?
         if let b = budgets["All"] {
-            let curTotal: Decimal = isCur ? total : ledger.reduce(Decimal.zero) {
-                ($1.counted && $1.date >= cur.start && $1.date < cur.end) ? $0 + $1.amt : $0
-            }
             let cs = span(cur, current: true)
             let remainingDays = max(cs.total - cs.elapsed + 1, 1)
             let before = curTotal - todayTotal
@@ -967,15 +1286,92 @@ enum Sample {
                            avg: avg, week: week, allowance: allowance, left: left)
     }
 
-    // MARK: Editing
+    // MARK: Persistence & CRUD Operations
 
-    private func snapshot() -> Undo { Undo(ov: overrides, tov: txOverrides, ex: excluded) }
+    private func snapshot() -> Undo {
+        Undo(ov: overrides, tov: txOverrides, ex: excluded, fxm: fixedMerchantMap, fxtx: fixedTxMap, delta: delta)
+    }
 
     private func persistRules() {
         let d = UserDefaults.standard
         d.set(overrides, forKey: Keys.overrides)
         d.set(txOverrides, forKey: Keys.txOverrides)
         d.set(Array(excluded), forKey: Keys.excluded)
+        d.set(fixedMerchantMap, forKey: Keys.fixedMerchantMap)
+        d.set(fixedTxMap, forKey: Keys.fixedTxMap)
+        let currentDelta = delta
+        let url = deltaFileURL
+        DispatchQueue.global(qos: .utility).async {
+            if let encoded = try? JSONEncoder().encode(currentDelta) {
+                try? encoded.write(to: url, options: .atomic)
+            }
+        }
+    }
+
+    /// Add a brand-new manual spend
+    func addManualTx(date: Date, src: String, last4: String, amt: Decimal, merchant: String, cat: String, fixedBucket: FixedBucket?) {
+        let u = snapshot()
+        let id = "manual-\(UUID().uuidString)"
+        let cleanSrc = src.trimmingCharacters(in: .whitespaces).isEmpty ? "Cash / Manual" : src.trimmingCharacters(in: .whitespaces)
+        let cleanLast4 = last4.trimmingCharacters(in: .whitespaces).isEmpty ? "0000" : last4.trimmingCharacters(in: .whitespaces)
+        let cleanMerchant = merchant.trimmingCharacters(in: .whitespaces).isEmpty ? "Manual Spend" : merchant.trimmingCharacters(in: .whitespaces)
+
+        let record = CustomTxRecord(id: id, date: date, src: cleanSrc, last4: cleanLast4, amt: amt, merchant: cleanMerchant, isManual: true)
+        delta.custom.append(record)
+        txOverrides[id] = cat
+        if let fb = fixedBucket {
+            fixedTxMap[id] = fb.rawValue
+        }
+        persistRules()
+        recompute()
+        newSpendTick += 1
+        show("Added \(Merchant.clean(cleanMerchant)) (\(m(amt)))", undo: u)
+    }
+
+    /// Update any existing spend (CSV or Manual)
+    func updateTx(_ t: Tx, date: Date, src: String, last4: String, amt: Decimal, merchant: String, cat: String, applyCatAll: Bool, fixedBucket: FixedBucket?, applyFixedAll: Bool) {
+        let u = snapshot()
+        let cleanSrc = src.trimmingCharacters(in: .whitespaces).isEmpty ? t.src : src.trimmingCharacters(in: .whitespaces)
+        let cleanLast4 = last4.trimmingCharacters(in: .whitespaces)
+        let cleanMerchant = merchant.trimmingCharacters(in: .whitespaces).isEmpty ? t.merchant : merchant.trimmingCharacters(in: .whitespaces)
+
+        if t.date != date || t.src != cleanSrc || t.last4 != cleanLast4 || t.amt != amt || t.merchant != cleanMerchant {
+            let rec = CustomTxRecord(id: t.id, date: date, src: cleanSrc, last4: cleanLast4, amt: amt, merchant: cleanMerchant, isManual: t.isManual)
+            delta.edits[t.id] = rec
+        }
+
+        let newKey = Merchant.key(cleanMerchant)
+        if applyCatAll {
+            overrides[newKey] = cat
+            let ids = ledger.filter { $0.key == newKey }.map { $0.id }
+            for id in ids { txOverrides[id] = nil }
+        } else {
+            txOverrides[t.id] = cat
+        }
+
+        let fbVal = fixedBucket?.rawValue ?? "NONE"
+        if applyFixedAll {
+            fixedMerchantMap[newKey] = fbVal
+            let ids = ledger.filter { $0.key == newKey }.map { $0.id }
+            for id in ids { fixedTxMap[id] = nil }
+        } else {
+            fixedTxMap[t.id] = fbVal
+        }
+
+        persistRules()
+        recompute()
+        show("Updated \(Merchant.clean(cleanMerchant))", undo: u)
+    }
+
+    /// Delete any spend (CSV or Manual)
+    func deleteTx(_ t: Tx) {
+        let u = snapshot()
+        delta.deleted.insert(t.id)
+        delta.custom.removeAll { $0.id == t.id }
+        delta.edits[t.id] = nil
+        persistRules()
+        recompute()
+        show("Deleted \(t.name) (\(m(t.amt)))", undo: u)
     }
 
     func assign(_ t: Tx, to c: String, all: Bool) {
@@ -1004,7 +1400,9 @@ enum Sample {
         let u = snapshot()
         overrides[t.key] = nil
         txOverrides[t.id] = nil
-        persistRules(); recompute(); show("Category reset to automatic", undo: u)
+        fixedMerchantMap[t.key] = nil
+        fixedTxMap[t.id] = nil
+        persistRules(); recompute(); show("Category & fixed bucket reset to automatic", undo: u)
     }
 
     func removeOverride(_ key: String) {
@@ -1014,7 +1412,7 @@ enum Sample {
 
     func resetAllOverrides() {
         let u = snapshot()
-        overrides = [:]; txOverrides = [:]
+        overrides = [:]; txOverrides = [:]; fixedMerchantMap = [:]; fixedTxMap = [:]
         persistRules(); recompute(); show("All learned categories cleared", undo: u)
     }
 
@@ -1029,6 +1427,7 @@ enum Sample {
     func undo() {
         guard let u = undoState else { return }
         overrides = u.ov; txOverrides = u.tov; excluded = u.ex
+        fixedMerchantMap = u.fxm; fixedTxMap = u.fxtx; delta = u.delta
         persistRules(); recompute()
         toast = nil
     }
@@ -1043,13 +1442,35 @@ enum Sample {
         }
     }
 
-    // MARK: Settings
+    // MARK: Settings & Targets
 
     func setBudget(_ id: String, _ v: Double?) {
         budgets[id] = v
         UserDefaults.standard.set(budgets, forKey: Keys.budgets)
         derive()
     }
+
+    func setFixedTarget(_ bucket: FixedBucket, _ v: Double?) {
+        fixedTargets[bucket.rawValue] = v
+        UserDefaults.standard.set(fixedTargets, forKey: Keys.fixedTargets)
+        derive()
+    }
+
+    func updateBankBalance(amount: Double?, asOf: Date, mode: String) {
+        bankBalance = amount
+        bankBalanceDate = asOf
+        bankBalanceMode = mode
+        let d = UserDefaults.standard
+        if let amount {
+            d.set(amount, forKey: Keys.bankBalance)
+        } else {
+            d.removeObject(forKey: Keys.bankBalance)
+        }
+        d.set(asOf, forKey: Keys.bankBalanceDate)
+        d.set(mode, forKey: Keys.bankBalanceMode)
+        derive()
+    }
+
     func setHideTransfers(_ v: Bool) {
         hideTransfers = v
         UserDefaults.standard.set(v, forKey: Keys.hideTransfers)
@@ -1087,14 +1508,13 @@ struct CSVExport: Transferable {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd HH:mm"
-        var s = "Date,Source,Last4,Amount,Merchant,Category,Counted\r\n"
+        var s = "Date,Source,Last4,Amount,Merchant,Category,FixedBucket,Counted\r\n"
         for t in txs {
-            s += "\(f.string(from: t.date)),\(csvEscape(t.src)),\(csvEscape(t.last4)),\(t.amt),\(csvEscape(t.merchant)),\(csvEscape(t.cat)),\(t.counted ? "yes" : "no")\r\n"
+            s += "\(f.string(from: t.date)),\(csvEscape(t.src)),\(csvEscape(t.last4)),\(t.amt),\(csvEscape(t.merchant)),\(csvEscape(t.cat)),\(csvEscape(t.fixedBucket?.rawValue ?? "")),\(t.counted ? "yes" : "no")\r\n"
         }
         return s
     }
 
-    // Built lazily: only when the user actually taps Share
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .commaSeparatedText) { item in
             let safe = item.name.replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }
@@ -1138,6 +1558,19 @@ struct CatBadge: View {
     }
 }
 
+struct FixedBadge: View {
+    let bucket: FixedBucket
+    var size: CGFloat = 28
+    var body: some View {
+        Image(systemName: bucket.symbol)
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(bucket.color, in: RoundedRectangle(cornerRadius: size * 0.26))
+            .accessibilityHidden(true)
+    }
+}
+
 struct SyncLabel: View {
     @Environment(Store.self) private var store
     var body: some View {
@@ -1162,6 +1595,9 @@ struct SpendRow: View {
 
     private var subtitle: String {
         var s = "\(t.src) \(t.last4) · \(Fmt.time.string(from: t.date))"
+        if let fb = t.fixedBucket, fb.rawValue != t.cat { s += " · \(fb.rawValue)" }
+        if t.isManual { s += " · manual" }
+        else if t.isEdited { s += " · edited" }
         if let r = t.reason { s += " · not counted (\(r.label))" }
         return s
     }
@@ -1183,9 +1619,12 @@ struct SpendRow: View {
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .leading) {
-            Button { store.detailTx = t } label: { Label("Category", systemImage: "tag") }.tint(.indigo)
+            Button { store.detailTx = t } label: { Label("Edit", systemImage: "pencil") }.tint(.indigo)
         }
-        .swipeActions(edge: .trailing) {
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) { store.deleteTx(t) } label: {
+                Label("Delete", systemImage: "trash")
+            }
             if t.counted || t.reason == .excluded {
                 Button { store.toggleExclude(t) } label: {
                     Label(t.counted ? "Exclude" : "Include", systemImage: t.counted ? "eye.slash" : "eye")
@@ -1194,7 +1633,7 @@ struct SpendRow: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(t.name), \(store.m(t.amt)), \(t.cat), \(t.src) \(t.last4), \(Fmt.time.string(from: t.date))")
-        .accessibilityHint("Opens details")
+        .accessibilityHint("Opens details to edit or delete")
     }
 }
 
@@ -1259,6 +1698,82 @@ struct DonutView: View {
 }
 
 // =====================================================================================
+// MARK: - Bank Balance Card (Real Balance Left)
+// =====================================================================================
+
+struct BalanceCardView: View {
+    @Environment(Store.self) private var store
+    private var bal: BalanceStatus { store.balanceStatus }
+
+    var body: some View {
+        Button { store.showBalanceSheet = true } label: {
+            if bal.isConfigured {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label("Real Bank Balance Left", systemImage: "building.columns.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.indigo)
+                        Spacer()
+                        Image(systemName: "pencil.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(store.m(bal.realRemaining))
+                        .font(.system(.title, design: .rounded, weight: .bold))
+                        .foregroundStyle(bal.realRemaining < 0 ? Color.red : Color.primary)
+                        .contentTransition(.numericText())
+
+                    Divider()
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Starting Balance").font(.caption2).foregroundStyle(.secondary)
+                            Text(store.m(bal.startingBalance)).font(.caption.weight(.semibold)).monospacedDigit()
+                        }
+                        Spacer()
+                        VStack(alignment: .center, spacing: 2) {
+                            Text(bal.mode == "sinceDate" ? "Spends Since \(bal.asOfDate.formatted(.dateTime.day().month(.abbreviated)))" : "This Month's Spends")
+                                .font(.caption2).foregroundStyle(.secondary)
+                            Text("−\(store.m(bal.spentAgainstBalance))").font(.caption.weight(.semibold)).foregroundStyle(.orange).monospacedDigit()
+                        }
+                        if bal.unpaidFixedCommitments > 0 {
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("After Fixed Bills").font(.caption2).foregroundStyle(.secondary)
+                                Text(store.m(bal.safeToSpend))
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(bal.safeToSpend < 0 ? Color.red : Color.green)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                HStack(spacing: 12) {
+                    Image(systemName: "building.columns.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.indigo)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Set your bank balance")
+                            .font(.subheadline.weight(.semibold))
+                        Text("Track how much balance is truly left after spends & fixed bills")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// =====================================================================================
 // MARK: - Today
 // =====================================================================================
 
@@ -1289,6 +1804,7 @@ struct TodayView: View {
         NavigationStack {
             List {
                 Section { hero }
+                Section { BalanceCardView() }
                 Section("Last 7 days") { WeekChart(days: today.week) }
                 Section {
                     if today.txs.isEmpty {
@@ -1297,20 +1813,28 @@ struct TodayView: View {
                         ForEach(today.txs) { SpendRow(t: $0) }
                     }
                 } header: {
-                    Text("Today's spends")
+                    HStack {
+                        Text("Today's spends")
+                        Spacer()
+                        Button { store.showAddSheet = true } label: {
+                            Label("Add Spend", systemImage: "plus.circle.fill").font(.caption.weight(.semibold))
+                        }
+                    }
                 }
             }
             .navigationTitle("Today")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Logo(size: 28) }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { store.toggleMask() } label: { Image(systemName: store.masked ? "eye.slash" : "eye") }
                         .accessibilityLabel(store.masked ? "Show amounts" : "Hide amounts")
+                    Button { store.showAddSheet = true } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Add manual spend")
                 }
             }
             .refreshable { await store.refresh(force: true) }
             .sensoryFeedback(.success, trigger: store.newSpendTick)
-            .overlay { if !store.hasData { EmptyStateView() } }
+            .overlay { if !store.hasData && !store.balanceStatus.isConfigured { EmptyStateView() } }
         }
     }
 
@@ -1358,6 +1882,233 @@ struct TodayView: View {
                 }
             }
         }
+    }
+}
+
+// =====================================================================================
+// MARK: - Monthly Fixed Expenses Sheet (New Tab)
+// =====================================================================================
+
+struct FixedExpensesView: View {
+    @Environment(Store.self) private var store
+    private var m: MonthStats { store.month }
+    private var fx: FixedMonthSummary { m.fixed }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                headerSection
+                bucketsSection
+                if store.balanceStatus.isConfigured {
+                    balanceImpactSection
+                }
+            }
+            .navigationTitle("Fixed Expenses")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { store.showAddSheet = true } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Add spend")
+                }
+            }
+            .refreshable { await store.refresh(force: true) }
+        }
+    }
+
+    private var headerSection: some View {
+        Section {
+            HStack {
+                Button { store.shiftMonth(-1) } label: { Image(systemName: "chevron.left") }
+                    .buttonStyle(.borderless)
+                Spacer()
+                Menu {
+                    ForEach(store.periods) { p in
+                        Button(p.title) { store.selectPeriod(p.anchor) }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(m.period.title).font(.headline)
+                        Image(systemName: "chevron.down").font(.caption2.weight(.bold))
+                    }
+                }
+                Spacer()
+                Button { store.shiftMonth(1) } label: { Image(systemName: "chevron.right") }
+                    .buttonStyle(.borderless).disabled(m.isCurrent)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Fixed Spends So Far").font(.caption).foregroundStyle(.secondary)
+                        Text(store.m(fx.totalSpent))
+                            .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                            .contentTransition(.numericText())
+                    }
+                    Spacer()
+                    if fx.totalBudgeted > 0 {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Monthly Plan").font(.caption).foregroundStyle(.secondary)
+                            Text(store.m(fx.totalBudgeted))
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if fx.totalBudgeted > 0 {
+                    ProgressView(value: min(max(fx.totalSpent.dbl / fx.totalBudgeted.dbl, 0), 1))
+                        .tint(fx.totalSpent > fx.totalBudgeted ? .red : .indigo)
+                    HStack {
+                        Text("\(store.m(fx.unpaidRemaining)) still pending from planned bills")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        let pct = Int((fx.totalSpent.dbl / max(fx.totalBudgeted.dbl, 1) * 100).rounded())
+                        Text("\(pct)%").font(.caption.bold()).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Tap a target button or swipe any row below to set your monthly fixed amounts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var bucketsSection: some View {
+        Section {
+            ForEach(fx.items) { item in
+                NavigationLink {
+                    FixedBucketDetailScreen(item: item)
+                } label: {
+                    fixedRow(item)
+                }
+                .swipeActions(edge: .trailing) {
+                    Button {
+                        store.fixedBudgetTarget = FixedBudgetTarget(bucket: item.bucket)
+                    } label: {
+                        Label("Set Plan", systemImage: "target")
+                    }
+                    .tint(.indigo)
+                }
+            }
+        } header: {
+            Text("Monthly Fixed Sheet (Auto-Updated)")
+        } footer: {
+            Text("Groceries, Food, Fuel, Rent, Home, and Electricity bills auto-detect from your transactions. You can also pin any transaction manually from its detail sheet.")
+        }
+    }
+
+    private func fixedRow(_ item: FixedItemStat) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                FixedBadge(bucket: item.bucket, size: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.bucket.rawValue).font(.body.weight(.medium))
+                    Text(item.count == 0 ? "No spends yet" : "\(item.count) spend\(item.count == 1 ? "" : "s") auto-tracked")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(store.m(item.spent))
+                        .font(.body.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(item.spent > 0 ? Color.primary : Color.secondary)
+                    if let target = item.target {
+                        Text("of \(store.m(target))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    } else {
+                        Button("Set target") {
+                            store.fixedBudgetTarget = FixedBudgetTarget(bucket: item.bucket)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.indigo)
+                    }
+                }
+            }
+
+            if let target = item.target, target > 0 {
+                let ratio = min(max(item.spent.dbl / target.dbl, 0), 1)
+                ProgressView(value: ratio)
+                    .tint(item.spent > target ? .red : (ratio >= 0.9 ? .orange : .green))
+                HStack {
+                    if item.spent >= target {
+                        Label(item.spent == target ? "Paid in full" : "Over plan by \(store.m(item.spent - target))",
+                              systemImage: item.spent == target ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(item.spent == target ? .green : .red)
+                    } else {
+                        Text("\(store.m(target - item.spent)) remaining")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var balanceImpactSection: some View {
+        let bal = store.balanceStatus
+        return Section("Bank Balance Projection") {
+            LabeledContent("Real Bank Balance Left", value: store.m(bal.realRemaining))
+            LabeledContent("Pending Fixed Expenses", value: "−\(store.m(bal.unpaidFixedCommitments))")
+            LabeledContent("Free Balance After Fixed Bills") {
+                Text(store.m(bal.safeToSpend))
+                    .bold()
+                    .foregroundStyle(bal.safeToSpend < 0 ? Color.red : Color.green)
+            }
+        }
+    }
+}
+
+struct FixedBucketDetailScreen: View {
+    @Environment(Store.self) private var store
+    let item: FixedItemStat
+
+    var body: some View {
+        let groups = groupByDay(item.txs)
+        List {
+            Section {
+                HStack {
+                    FixedBadge(bucket: item.bucket, size: 36)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(store.m(item.spent))
+                            .font(.system(.title, design: .rounded, weight: .bold))
+                        Text(item.bucket.ruleDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Set Target") {
+                        store.fixedBudgetTarget = FixedBudgetTarget(bucket: item.bucket)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                if let target = item.target {
+                    LabeledContent("Monthly Target", value: store.m(target))
+                    LabeledContent("Difference", value: item.spent > target ? "+\(store.m(item.spent - target))" : store.m(target - item.spent))
+                }
+            }
+            if groups.isEmpty {
+                Section {
+                    Text("No transactions matched for \(item.bucket.rawValue) in \(store.month.period.title).")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(groups) { g in
+                    Section {
+                        ForEach(g.items) { SpendRow(t: $0) }
+                    } header: { DayHeader(g: g) }
+                }
+            }
+        }
+        .navigationTitle(item.bucket.rawValue)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -1438,8 +2189,6 @@ struct MonthView: View {
         }
     }
 
-    // MARK: Header
-
     private var headerSection: some View {
         Section {
             HStack {
@@ -1510,8 +2259,6 @@ struct MonthView: View {
                 .font(.footnote)
         }
     }
-
-    // MARK: Charts + breakdowns
 
     @ViewBuilder private var chartSections: some View {
         switch mode {
@@ -1615,8 +2362,6 @@ struct MonthView: View {
         }
     }
 
-    // MARK: Insights
-
     @ViewBuilder private var insightSections: some View {
         if m.countedCount > 0 {
             Section("Insights") {
@@ -1702,20 +2447,24 @@ struct SpendsView: View {
             .navigationTitle("Spends")
             .searchable(text: $search, prompt: "Merchant, card or amount")
             .toolbar {
-                if !store.review.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !store.review.isEmpty {
                         Button { showReview = true } label: {
                             Label("Review (\(store.review.count))", systemImage: "tray.full")
                         }
                     }
+                    Button { store.showAddSheet = true } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add manual spend")
                 }
             }
             .refreshable { await store.refresh(force: true) }
-            .task(id: search) {   // debounce typing
+            .task(id: search) {
                 do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
                 query = search.trimmingCharacters(in: .whitespaces)
             }
-            .task(id: key) {      // grouping runs off the main thread
+            .task(id: key) {
                 let src = store.ledger
                 let c = cat, b = bank, q = query.lowercased()
                 let g = await Task.detached(priority: .userInitiated) {
@@ -1761,69 +2510,383 @@ struct SpendsView: View {
 }
 
 // =====================================================================================
-// MARK: - Sheets: transaction detail, review inbox, budget
+// MARK: - Sheets: Add Spend, Edit/Delete Spend Detail, Bank Balance, Review, Budgets
 // =====================================================================================
+
+struct AddTxSheet: View {
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var amountText = ""
+    @State private var merchant = ""
+    @State private var src = "HDFC Credit Card"
+    @State private var last4 = "0000"
+    @State private var date = Date()
+    @State private var cat = "Food"
+    @State private var autoCategorise = true
+    @State private var fixedBucket: FixedBucket? = nil
+
+    private var parsedAmount: Decimal? {
+        let cleaned = amountText.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+        guard let d = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")), !d.isNaN, d != 0 else { return nil }
+        return d
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Spend Details") {
+                    HStack {
+                        Text("₹").font(.title2.bold()).foregroundStyle(.secondary)
+                        TextField("Amount", text: $amountText)
+                            .keyboardType(.decimalPad)
+                            .font(.system(.title2, design: .rounded, weight: .bold))
+                    }
+                    TextField("Merchant / Description (e.g. Bescom, Swiggy)", text: $merchant)
+                        .onChange(of: merchant) { _, newVal in
+                            if autoCategorise {
+                                let detectedCat = Categorizer.category(for: newVal)
+                                cat = detectedCat
+                                fixedBucket = Categorizer.fixedBucket(for: newVal, category: detectedCat)
+                            }
+                        }
+                    DatePicker("Date & Time", selection: $date)
+                }
+
+                Section("Payment Method") {
+                    if !store.sources.isEmpty {
+                        Menu {
+                            ForEach(store.sources.indices, id: \.self) { idx in
+                                let pair = store.sources[idx]
+                                Button("\(pair.src) (\(pair.last4))") {
+                                    src = pair.src
+                                    last4 = pair.last4
+                                }
+                            }
+                            Button("Cash / Manual (0000)") {
+                                src = "Cash"
+                                last4 = "0000"
+                            }
+                        } label: {
+                            LabeledContent("Quick Select Card/Account") {
+                                Text("\(src) · \(last4)").foregroundStyle(.indigo)
+                            }
+                        }
+                    }
+                    TextField("Source (e.g. HDFC Credit Card, SBI Account)", text: $src)
+                    TextField("Last 4 Digits", text: $last4)
+                        .keyboardType(.numberPad)
+                }
+
+                Section("Category & Fixed Expense Sheet") {
+                    Picker("Category", selection: $cat) {
+                        ForEach(Cats.names, id: \.self) { n in
+                            Label(n, systemImage: Cats.symbol(n)).tag(n)
+                        }
+                    }
+                    .onChange(of: cat) { _, newCat in
+                        if newCat == "Food" { fixedBucket = .food }
+                        else if newCat == "Groceries" { fixedBucket = .groceries }
+                    }
+
+                    Picker("Fixed Monthly Bucket", selection: $fixedBucket) {
+                        Text("None (Not a Fixed Expense)").tag(Optional<FixedBucket>.none)
+                        ForEach(FixedBucket.allCases) { b in
+                            Label(b.rawValue, systemImage: b.symbol).tag(Optional(b))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add Spend")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        guard let amt = parsedAmount else { return }
+                        store.addManualTx(date: date, src: src, last4: last4, amt: amt, merchant: merchant, cat: cat, fixedBucket: fixedBucket)
+                        dismiss()
+                    }
+                    .disabled(parsedAmount == nil)
+                }
+            }
+            .onAppear {
+                if let first = store.sources.first {
+                    src = first.src
+                    last4 = first.last4
+                }
+            }
+        }
+    }
+}
 
 struct TxDetail: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
     let t: Tx
+
+    @State private var amountText: String
+    @State private var merchant: String
+    @State private var src: String
+    @State private var last4: String
+    @State private var date: Date
     @State private var cat: String
-    @State private var applyAll = true
+    @State private var applyCatAll = false
+    @State private var fixedBucket: FixedBucket?
+    @State private var applyFixedAll = false
+    @State private var confirmDelete = false
 
     init(t: Tx) {
         self.t = t
+        _amountText = State(initialValue: "\(t.amt)")
+        _merchant = State(initialValue: t.merchant)
+        _src = State(initialValue: t.src)
+        _last4 = State(initialValue: t.last4)
+        _date = State(initialValue: t.date)
         _cat = State(initialValue: t.cat)
+        _fixedBucket = State(initialValue: t.fixedBucket)
+    }
+
+    private var parsedAmount: Decimal? {
+        let cleaned = amountText.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+        guard let d = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX")), !d.isNaN else { return nil }
+        return d
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Edit Entry Details") {
+                    HStack {
+                        Text("₹").font(.title2.bold()).foregroundStyle(.secondary)
+                        TextField("Amount", text: $amountText)
+                            .keyboardType(.decimalPad)
+                            .font(.system(.title2, design: .rounded, weight: .bold))
+                    }
+                    TextField("Merchant", text: $merchant)
+                    TextField("Bank / Card Name", text: $src)
+                    TextField("Last 4 Digits", text: $last4)
+                        .keyboardType(.numberPad)
+                    DatePicker("When", selection: $date)
+                }
+
+                Section("Category") {
+                    Picker("Category", selection: $cat) {
+                        ForEach(Cats.names, id: \.self) { n in
+                            Label(n, systemImage: Cats.symbol(n)).tag(n)
+                        }
+                    }
+                    let matchCount = store.ledger.filter { $0.key == Merchant.key(merchant) }.count
+                    if matchCount > 1 {
+                        Toggle("Apply category to all “\(Merchant.clean(merchant))” (\(matchCount))", isOn: $applyCatAll)
+                    }
+                }
+
+                Section {
+                    Picker("Fixed Expense Sheet", selection: $fixedBucket) {
+                        Text("None").tag(Optional<FixedBucket>.none)
+                        ForEach(FixedBucket.allCases) { b in
+                            Label(b.rawValue, systemImage: b.symbol).tag(Optional(b))
+                        }
+                    }
+                    let matchCount = store.ledger.filter { $0.key == Merchant.key(merchant) }.count
+                    if matchCount > 1 {
+                        Toggle("Always map “\(Merchant.clean(merchant))” to this fixed sheet", isOn: $applyFixedAll)
+                    }
+                } header: {
+                    Text("Monthly Fixed Expense Tracking")
+                } footer: {
+                    Text("Assigning this links the spend to your monthly Fixed Expenses tab.")
+                }
+
+                Section {
+                    Toggle("Exclude from totals", isOn: Binding(
+                        get: { store.excluded.contains(t.id) },
+                        set: { _ in store.toggleExclude(t) }))
+                    Button("Reset category & fixed bucket to automatic") {
+                        store.resetCategory(t)
+                        dismiss()
+                    }
+                    Button("Delete Spend", role: .destructive) {
+                        confirmDelete = true
+                    }
+                }
+            }
+            .navigationTitle("Edit Spend")
+            .navigationBarTitleDisplayMode(.inline)
+            .confirmationDialog("Delete this spend?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete Spend", role: .destructive) {
+                    store.deleteTx(t)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let amt = parsedAmount else { return }
+                        store.updateTx(t, date: date, src: src, last4: last4, amt: amt, merchant: merchant,
+                                       cat: cat, applyCatAll: applyCatAll, fixedBucket: fixedBucket, applyFixedAll: applyFixedAll)
+                        dismiss()
+                    }
+                    .disabled(parsedAmount == nil)
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+}
+
+struct BankBalanceSheet: View {
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var text = ""
+    @State private var mode = "month"
+    @State private var asOfDate = Date()
+
+    private var value: Double? {
+        let cleaned = text.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+        guard let v = Double(cleaned), v >= 0 else { return nil }
+        return v
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(store.m(t.amt)).font(.system(.largeTitle, design: .rounded, weight: .bold))
-                        Text(t.name).font(.headline)
+                    HStack {
+                        Text("₹").font(.title2.bold()).foregroundStyle(.secondary)
+                        TextField("Total Bank Balance", text: $text)
+                            .keyboardType(.decimalPad)
+                            .font(.system(.title2, design: .rounded, weight: .bold))
                     }
-                    LabeledContent("Original text", value: t.merchant)
-                    LabeledContent("Card", value: "\(t.src) \(t.last4)")
-                    LabeledContent("When", value: t.date.formatted(date: .abbreviated, time: .shortened))
-                }
-                Section("Category") {
-                    ForEach(Cats.names, id: \.self) { n in
-                        Button { cat = n } label: {
-                            HStack {
-                                CatBadge(cat: n, size: 26)
-                                Text(n)
-                                Spacer()
-                                if cat == n { Image(systemName: "checkmark").foregroundStyle(.tint) }
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach([25000, 50000, 100000, 200000, 500000], id: \.self) { v in
+                                Button { text = String(v) } label: {
+                                    Chip(title: inrCompact(Double(v)), icon: "plus", active: text == String(v))
+                                }
+                                .buttonStyle(.plain)
                             }
-                        }.foregroundStyle(.primary)
+                        }
                     }
-                    Toggle("Apply to all “\(t.name)” spends (\(store.ledger.filter { $0.key == t.key }.count))", isOn: $applyAll)
+                } header: {
+                    Text("Total Available Balance")
                 }
+
                 Section {
-                    Toggle("Exclude from totals", isOn: Binding(
-                        get: { store.excluded.contains(t.id) },
-                        set: { _ in store.toggleExclude(t) }))
-                    Button("Reset category to automatic") {
-                        store.resetCategory(t)
-                        dismiss()
+                    Picker("Deduct Spends From", selection: $mode) {
+                        Text("Current Billing Cycle (\(store.month.period.title))").tag("month")
+                        Text("Specific Date & Time").tag("sinceDate")
+                    }
+                    if mode == "sinceDate" {
+                        DatePicker("Balance Entered As Of", selection: $asOfDate)
+                    }
+                } header: {
+                    Text("How should spends be deducted?")
+                } footer: {
+                    Text(mode == "month"
+                         ? "Deducts all counted spends in the current billing month from your starting balance."
+                         : "Deducts only counted spends that occurred after the timestamp above.")
+                }
+
+                if store.bankBalance != nil {
+                    Section {
+                        Button("Clear Bank Balance", role: .destructive) {
+                            store.updateBankBalance(amount: nil, asOf: .now, mode: "month")
+                            dismiss()
+                        }
                     }
                 }
             }
-            .navigationTitle("Spend")
+            .navigationTitle("Bank Balance")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        if cat != t.cat { store.assign(t, to: cat, all: applyAll) }
+                        if let v = value {
+                            store.updateBankBalance(amount: v, asOf: asOfDate, mode: mode)
+                        }
                         dismiss()
                     }
+                    .disabled(value == nil)
                 }
+            }
+            .onAppear {
+                text = store.bankBalance.map { String(Int($0)) } ?? ""
+                mode = store.bankBalanceMode
+                asOfDate = store.bankBalanceDate
             }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+struct FixedBudgetSheet: View {
+    @Environment(Store.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let target: FixedBudgetTarget
+    @State private var text = ""
+
+    private var value: Double? {
+        let cleaned = text.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+        guard let v = Double(cleaned), v > 0 else { return nil }
+        return v
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack {
+                        FixedBadge(bucket: target.bucket, size: 32)
+                        Text(target.bucket.rawValue).font(.headline)
+                    }
+                    TextField("Monthly planned amount in ₹", text: $text)
+                        .keyboardType(.numberPad)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach([1500, 3000, 5000, 10000, 25000, 40000], id: \.self) { v in
+                                Button { text = String(v) } label: {
+                                    Chip(title: inrCompact(Double(v)), icon: "plus", active: text == String(v))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                } footer: {
+                    Text(target.bucket.ruleDescription)
+                }
+
+                if store.fixedTargets[target.bucket.rawValue] != nil {
+                    Section {
+                        Button("Remove Target", role: .destructive) {
+                            store.setFixedTarget(target.bucket, nil)
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .navigationTitle("\(target.bucket.rawValue) Target")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        if let v = value { store.setFixedTarget(target.bucket, v) }
+                        dismiss()
+                    }
+                    .disabled(value == nil)
+                }
+            }
+            .onAppear {
+                text = store.fixedTargets[target.bucket.rawValue].map { String(Int($0)) } ?? ""
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 
@@ -1939,7 +3002,7 @@ struct EmptyStateView: View {
     }
     private var message: String {
         switch store.sync {
-        case .noFile: return "Connect the CSV that your Shortcut writes to and your spends show up here."
+        case .noFile: return "Connect the CSV that your Shortcut writes to, or add spends manually."
         case .loading: return "One moment."
         case .missing: return "The file was moved or deleted. Choose it again."
         case .unreadable: return "Check that the file is downloaded and try again."
@@ -1958,7 +3021,7 @@ struct EmptyStateView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Your Shortcut appends each spend to myspends.csv", systemImage: "1.circle")
                         Label("Choose that file here once", systemImage: "2.circle")
-                        Label("The app updates itself as new spends arrive", systemImage: "3.circle")
+                        Label("Or tap + anytime to add spends manually", systemImage: "3.circle")
                     }
                     .font(.subheadline).foregroundStyle(.secondary)
                 }
@@ -1967,6 +3030,7 @@ struct EmptyStateView: View {
                         .font(.footnote).foregroundStyle(.orange).multilineTextAlignment(.center)
                 }
                 Button("Choose CSV file") { store.showPicker = true }.buttonStyle(.borderedProminent)
+                Button("Add a manual spend") { store.showAddSheet = true }.buttonStyle(.bordered)
                 Button("Try with sample data") { store.useSample() }
             }
             .padding(24)
@@ -1986,6 +3050,20 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Bank Balance") {
+                    Button { store.showBalanceSheet = true } label: {
+                        LabeledContent("Starting Balance") {
+                            Text(store.bankBalance.map { inr(Decimal($0)) } ?? "Not set")
+                                .foregroundStyle(.secondary)
+                        }
+                    }.foregroundStyle(.primary)
+                    if store.balanceStatus.isConfigured {
+                        LabeledContent("Real Balance Left") {
+                            Text(store.m(store.balanceStatus.realRemaining)).bold()
+                        }
+                    }
+                }
+
                 Section("Data file") {
                     LabeledContent("Status") { SyncLabel() }
                     Button("Choose CSV file", systemImage: "doc") { store.showPicker = true }
@@ -1995,6 +3073,18 @@ struct SettingsView: View {
                         Text("\(store.skipped) lines couldn't be read").foregroundStyle(.orange)
                     }
                 }
+
+                Section("Monthly Fixed Expense Targets") {
+                    ForEach(FixedBucket.allCases) { b in
+                        Button { store.fixedBudgetTarget = FixedBudgetTarget(bucket: b) } label: {
+                            LabeledContent(b.rawValue) {
+                                Text(store.fixedTargets[b.rawValue].map { inr(Decimal($0)) } ?? "Not set")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }.foregroundStyle(.primary)
+                    }
+                }
+
                 Section("Totals") {
                     Toggle("Hide transfers from totals", isOn: Binding(
                         get: { store.hideTransfers }, set: { store.setHideTransfers($0) }))
@@ -2003,15 +3093,18 @@ struct SettingsView: View {
                     Stepper("Month starts on day \(store.cycleDay)",
                             value: Binding(get: { store.cycleDay }, set: { store.setCycleDay($0) }), in: 1...28)
                 }
+
                 Section {
                     budgetRow("All", title: "Overall")
                     ForEach(Cats.names.filter { $0 != "Transfers" }, id: \.self) { budgetRow($0, title: $0) }
-                } header: { Text("Monthly budgets") }
+                } header: { Text("Category budgets") }
+
                 Section("Privacy") {
                     Toggle("Hide amounts", isOn: Binding(get: { store.masked }, set: { _ in store.toggleMask() }))
                     Toggle("Hide in app switcher", isOn: Binding(get: { store.coverEnabled }, set: { store.setCover($0) }))
                     Toggle("Require Face ID / passcode", isOn: Binding(get: { store.lockEnabled }, set: { store.setLock($0) }))
                 }
+
                 Section("Share") {
                     ShareLink(item: CSVExport(txs: store.month.txs, name: store.month.period.title),
                               preview: SharePreview("Spends – \(store.month.period.title)")) {
@@ -2021,6 +3114,7 @@ struct SettingsView: View {
                         Label("Share month summary", systemImage: "text.alignleft")
                     }
                 }
+
                 Section {
                     if store.overrides.isEmpty {
                         Text("Nothing yet. Tap a spend and change its category to teach the app.")
@@ -2083,13 +3177,17 @@ struct RootView: View {
     var body: some View {
         TabView {
             TodayView().tabItem { Label("Today", systemImage: "sun.max") }
+            FixedExpensesView().tabItem { Label("Fixed", systemImage: "checklist.checked") }
             MonthView().tabItem { Label("Month", systemImage: "chart.pie") }
             SpendsView().tabItem { Label("Spends", systemImage: "list.bullet") }
                 .badge(store.review.count)
             SettingsView().tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .sheet(item: Binding(get: { store.detailTx }, set: { store.detailTx = $0 })) { TxDetail(t: $0) }
+        .sheet(isPresented: Binding(get: { store.showAddSheet }, set: { store.showAddSheet = $0 })) { AddTxSheet() }
+        .sheet(isPresented: Binding(get: { store.showBalanceSheet }, set: { store.showBalanceSheet = $0 })) { BankBalanceSheet() }
         .sheet(item: Binding(get: { store.budgetTarget }, set: { store.budgetTarget = $0 })) { BudgetSheet(target: $0) }
+        .sheet(item: Binding(get: { store.fixedBudgetTarget }, set: { store.fixedBudgetTarget = $0 })) { FixedBudgetSheet(target: $0) }
         .fileImporter(isPresented: Binding(get: { store.showPicker }, set: { store.showPicker = $0 }),
                       allowedContentTypes: [.commaSeparatedText, .plainText]) { result in
             if case .success(let u) = result { store.chooseFile(u) }
@@ -2115,8 +3213,6 @@ struct RootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in store.tickNow() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in store.tickNow() }
-        // One task: lifecycle + polling. Polling only runs while the app is active and
-        // is nearly free because the engine skips unchanged files (mod date + size).
         .task(id: phase) {
             store.phaseChanged(phase)
             guard phase == .active else { return }
@@ -2140,3 +3236,4 @@ struct RootView: View {
         }
     }
 }
+
